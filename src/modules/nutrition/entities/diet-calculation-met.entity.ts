@@ -7,27 +7,27 @@ export class DietCalculationMet {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column()
+    @Column({ name: 'calculation_id' })
     calculationId: string;
 
-    @Column()
+    @Column({ name: 'met_code' })
     metCode: string;
 
     @Column({
         type: 'decimal',
         precision: 5,
         scale: 2,
+        name: 'metFactor'
     })
     metFactor: number;
 
-    @Column()
+    @Column({ name: 'frequencyPerWeek' })
     frequencyPerWeek: number;
 
-    @Column()
+    @Column({ name: 'durationMinutes' })
     durationMinutes: number;
 
     // Relacionamentos
-
     @ManyToOne(() => DietCalculation, calculation => calculation.mets)
     @JoinColumn({ name: 'calculation_id' })
     calculation: DietCalculation;

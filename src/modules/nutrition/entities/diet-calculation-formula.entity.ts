@@ -6,7 +6,7 @@ export class DietCalculationFormula {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column()
+    @Column({ name: 'calculation_id' })
     calculationId: string;
 
     @Column()
@@ -20,7 +20,6 @@ export class DietCalculationFormula {
     formulaValue: number;
 
     // Relacionamento
-
     @ManyToOne(() => DietCalculation, calculation => calculation.formulas)
     @JoinColumn({ name: 'calculation_id' })
     calculation: DietCalculation;

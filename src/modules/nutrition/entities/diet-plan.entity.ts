@@ -9,13 +9,13 @@ export class DietPlan {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column({ name: 'user_id', type: 'integer' }) // Mantido como integer conforme o diagrama
+    @Column({ name: 'user_id' })
     userId: number;
 
     @Column({ name: 'job_id' })
     jobId: string;
 
-    @Column({ name: 'calculation_id', nullable: true })
+    @Column({ name: 'calculation_id' })
     calculationId: string;
 
     @Column()
