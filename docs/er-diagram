@@ -1,0 +1,129 @@
+erDiagram
+    USERS ||--o{ USER_LOGIN_HISTORY : "registra"
+    USERS ||--o{ PASSWORD_RESET_TOKENS : "solicita"
+    USERS ||--o{ USER_BIOMETRICS : "possui"
+    USERS ||--o{ USER_ACTIVITIES : "realiza"
+    USERS ||--o{ USER_MET_CALCULATIONS : "calcula"
+    USERS ||--o{ USER_NUTRITION_GOALS : "define"
+    USERS ||--o{ USER_FOOD_PREFERENCES : "especifica"
+    USERS ||--o{ DIET_GENERATION_JOBS : "cria"
+    USERS ||--o{ DIET_PLANS : "possui"
+
+    DIET_GENERATION_JOBS ||--o{ DIET_PLANS : "gera"
+    USER_ACTIVITIES }o--|| MET_REFERENCES : "referencia"
+
+    USERS {
+        int id PK
+        string email
+        string password
+        string name
+        enum role
+        string refreshToken
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    USER_LOGIN_HISTORY {
+        int id PK
+        int userId FK
+        string ipAddress
+        string userAgent
+        string status
+        datetime createdAt
+    }
+
+    PASSWORD_RESET_TOKENS {
+        int id PK
+        int userId FK
+        string token
+        datetime expiresAt
+        datetime createdAt
+    }
+
+    USER_BIOMETRICS {
+        uuid id PK
+        int userId FK
+        decimal weight
+        decimal height
+        int age
+        string gender
+        decimal leanMass
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    MET_REFERENCES {
+        string code PK
+        string description
+        decimal metValue
+        string category
+    }
+
+    USER_ACTIVITIES {
+        uuid id PK
+        int userId FK
+        string metCode FK
+        int frequencyPerWeek
+        int durationMinutes
+        boolean isActive
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    USER_MET_CALCULATIONS {
+        uuid id PK
+        int userId FK
+        decimal totalMet
+        decimal activityLevel
+        datetime calculationDate
+        boolean isCurrent
+    }
+
+    USER_NUTRITION_GOALS {
+        uuid id PK
+        int userId FK
+        enum goalType
+        int calorieAdjustment
+        int mealsPerDay
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    USER_FOOD_PREFERENCES {
+        uuid id PK
+        int userId FK
+        enum type
+        text description
+        datetime createdAt
+    }
+
+    DIET_GENERATION_JOBS {
+        uuid id PK
+        int userId FK
+        string jobType
+        enum status
+        jsonb inputData
+        jsonb resultData
+        text errorLogs
+        int progress
+        string bullJobId
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    DIET_PLANS {
+        uuid id PK
+        int userId FK
+        uuid jobId FK
+        string name
+        decimal tmb
+        decimal get
+        decimal met
+        decimal getd
+        decimal activityLevel
+        int totalCalories
+        string application
+        jsonb planData
+        datetime createdAt
+        datetime updatedAt
+    }

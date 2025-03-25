@@ -1,0 +1,41 @@
+flowchart TD
+    Client[Cliente HTTP] --> API[API NestJS]
+
+    subgraph "Camada de API"
+        API --> AuthC[Auth Controller]
+        API --> UsersC[Users Controller]
+        API --> NutritionC[Nutrition Controller]
+        API --> DietC[Diet Controller]
+    end
+
+    subgraph "Camada de Serviço"
+        AuthC --> AuthS[Auth Service]
+        UsersC --> UsersS[Users Service]
+        NutritionC --> NutritionS[Nutrition Service]
+        NutritionC --> DietService[Diet Service]
+        DietC --> DietService
+        DietC --> DietProcessorS[Diet Processor Service]
+    end
+
+    subgraph "Processamento Assíncrono"
+        DietProcessorS -- Enfileira --> JobQueue[(Bull Job Queue)]
+        JobQueue -- Consome --> Worker[Worker Process]
+        Worker --> AIFactory[AI Service Factory]
+        AIFactory --> GeminiAI[Gemini AI]
+        AIFactory --> OpenAI[OpenAI]
+        AIFactory --> AnthropicAI[Anthropic AI]
+    end
+
+    subgraph "Camada de Persistência"
+        AuthS --> DB[(PostgreSQL)]
+        UsersS --> DB
+        NutritionS --> DB
+        DietService --> DB
+        Worker --> DB
+    end
+
+    subgraph "Infraestrutura"
+        JobQueue --- Redis[(Redis)]
+        API --- Cache[Cache]
+        Cache --- Redis
+    end

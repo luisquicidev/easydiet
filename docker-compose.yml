@@ -1,0 +1,109 @@
+version: '3.8'
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: easydiet-api
+    ports:
+      - "3000:3000"
+      - "9229:9229"
+    environment:
+      - PORT=3000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=easydiet
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=supersecretkey
+      - APP_TYPE=api
+      - NODE_ENV=development
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: npm run start:debug
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: easydiet-worker
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=easydiet
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=supersecretkey
+      - APP_TYPE=worker
+      - NODE_ENV=development
+      # Configure as variáveis específicas para workers
+      - QUEUE_CONCURRENCY=2
+      - QUEUE_CLEANUP_THRESHOLD_DAYS=7
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: npm run start:worker:dev
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    # Pode ser escalado horizontalmente em produção
+    # deploy:
+    #   replicas: 2
+
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=easydiet
+    volumes:
+      - ./docker/pg:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d easydiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
