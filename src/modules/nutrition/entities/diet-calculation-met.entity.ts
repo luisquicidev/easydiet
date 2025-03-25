@@ -24,7 +24,7 @@ export class DietCalculationMet {
     @Column({ name: 'frequencyPerWeek' })
     frequencyPerWeek: number;
 
-    @Column({ name: 'durationMinutes' })
+    @Column({ name: 'duration_minutes' })
     durationMinutes: number;
 
     // Relacionamentos

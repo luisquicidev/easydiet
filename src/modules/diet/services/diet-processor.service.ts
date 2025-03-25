@@ -9,6 +9,7 @@ import {DietMeal, DietPlan, FoodPreferenceType} from "../../nutrition/entities";
 import {MealDetailsDto} from "../../nutrition/dto";
 import {AIServiceFactory} from "../../../shared/factories/ai-service.factory";
 import {DietGoalType} from "../../nutrition/entities/user-nutrition-goal.entity";
+import {DietPlanGenerationDto} from "../../nutrition/dto/diet-macronutrients.dto";
 
 export enum DietProcessPhase {
     CALCULATION = 1,
@@ -201,7 +202,6 @@ export class DietProcessorService {
             if (!calculation.plans || calculation.plans.length === 0) {
                 this.logger.warn(`Nenhum plano encontrado para o cálculo ${calculationId}. Gerando planos padrão.`);
 
-                // Lógica para gerar planos padrão
                 const defaultPlans = [
                     {
                         name: 'Plano Padrão',
@@ -215,7 +215,7 @@ export class DietProcessorService {
                     }
                 ];
 
-                // Salvar planos
+                // Criar planos
                 const savedPlans = await Promise.all(
                     defaultPlans.map(plan =>
                         this.dietService.createDietPlan({
@@ -232,7 +232,49 @@ export class DietProcessorService {
                 this.logger.log(`Planos padrão gerados: ${JSON.stringify(savedPlans, null, 2)}`);
             }
 
-            // Atualizar o job e o cálculo
+            // IMPORTANTE: Gerar os dados de refeições para cada plano
+            for (const plan of calculation.plans) {
+                // Criar prompt para geração de refeições
+                const planPromptData = {
+                    name: plan.name,
+                    totalCalories: plan.totalCalories,
+                    application: plan.application,
+                    macronutrients: {
+                        protein: plan.protein,
+                        carbs: plan.carbs,
+                        fat: plan.fat
+                    }
+                };
+
+                // Gerar prompt para planejamento de refeições
+                const prompt = this.dietService.generateMealPlanningPrompt([planPromptData], mealsPerDay);
+
+                // Chamar serviço de IA
+                const aiService = this.aiServiceFactory.getServiceWithFallback();
+                const response = await aiService.generateJsonCompletion<DietPlanGenerationDto>(prompt);
+
+                // Salvar planos de refeições
+                await this.dietService.saveMealPlans(
+                    jobId,
+                    calculationId,
+                    response.content as DietPlanGenerationDto
+                );
+
+                // Para cada plano, enfileirar detalhamento de refeições
+                const savedPlan = await this.dietService.getDietPlan(plan.id);
+
+                // Enfileirar detalhamento para cada refeição do plano
+                for (const meal of savedPlan.meals) {
+                    await this.queueFoodDetailing(
+                        userId,
+                        jobId,
+                        savedPlan.id,
+                        meal.id
+                    );
+                }
+            }
+
+            // Atualizar job e cálculo
             await this.dietService.updateDietJob(jobId, {
                 status: DietJobStatusEnum.COMPLETED,
                 progress: 100,

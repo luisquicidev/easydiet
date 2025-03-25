@@ -24,21 +24,19 @@ export class DietQueueProcessor {
     @Process('meal-planning')
     async handleMealPlanning(job: Job<MealPlanningData>) {
         this.logger.debug(`Processing meal planning job ${job.id}`);
-        this.logger.debug(`Job data: ${JSON.stringify(job.data, null, 2)}`);
-
         try {
-            const result = await this.dietProcessorService.processMealPlanning(job);
+            // Registrar progresso inicial
+            await job.progress(10);
 
-            this.logger.debug(`Meal planning job ${job.id} result: ${JSON.stringify(result, null, 2)}`);
+            const { userId, jobId, calculationId, mealsPerDay } = job.data;
+            this.logger.log(`Processing meal planning for user ${userId}, calculation ${calculationId}`);
+
+            // Chamar o serviço de processamento
+            await this.dietProcessorService.processMealPlanning(job);
+
             this.logger.debug(`Meal planning job ${job.id} completed successfully`);
         } catch (error) {
-            this.logger.error(`Erro detalhado no processamento do job de planejamento de refeições ${job.id}:`, error);
-
-            // Log stack trace completo
-            if (error instanceof Error) {
-                this.logger.error(error.stack);
-            }
-
+            this.logger.error(`Error processing meal planning job ${job.id}: ${error.message}`, error.stack);
             throw error;
         }
     }

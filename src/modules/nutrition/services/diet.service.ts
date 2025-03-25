@@ -689,7 +689,7 @@ export class DietService {
     /**
      * Gera o prompt para o planejamento de refeições (Fase 2)
      */
-    private generateMealPlanningPrompt(plans: any[], mealAmount: number): string {
+    generateMealPlanningPrompt(plans: any[], mealAmount: number): string {
         let prompt = `
     # Função e objetivo  
     Você é um especialista em análise e distribuição alimentar, com foco exclusivo na determinação precisa das necessidades individuais.
@@ -741,7 +741,7 @@ export class DietService {
     /**
      * Salva os planos de refeições no banco de dados
      */
-    private async saveMealPlans(
+    async saveMealPlans(
         jobId: string,
         calculationId: string,
         planData: DietPlanGenerationDto
