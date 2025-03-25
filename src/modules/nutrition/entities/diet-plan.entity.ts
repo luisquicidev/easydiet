@@ -9,13 +9,13 @@ export class DietPlan {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column()
+    @Column({ name: 'user_id', type: 'integer' }) // Mantido como integer conforme o diagrama
     userId: number;
 
-    @Column()
+    @Column({ name: 'job_id' })
     jobId: string;
 
-    @Column({ nullable: true })
+    @Column({ name: 'calculation_id', nullable: true })
     calculationId: string;
 
     @Column()
@@ -104,7 +104,6 @@ export class DietPlan {
     updatedAt: Date;
 
     // Relacionamentos
-
     @ManyToOne(() => User, user => user.dietPlans)
     @JoinColumn({ name: 'user_id' })
     user: User;

@@ -8,7 +8,7 @@ export class DietMeal {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column()
+    @Column({ name: 'plan_id' })
     planId: string;
 
     @Column()
@@ -64,7 +64,6 @@ export class DietMeal {
     updatedAt: Date;
 
     // Relacionamentos
-
     @ManyToOne(() => DietPlan, plan => plan.meals)
     @JoinColumn({ name: 'plan_id' })
     plan: DietPlan;
