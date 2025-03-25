@@ -9,10 +9,12 @@ import { DietCalculationMet } from '../entities/diet-calculation-met.entity';
 import { MetReference } from '../entities/met-reference.entity';
 import { UserActivity } from '../entities/user-activity.entity';
 import { AIServiceFactory } from '../../../shared/factories/ai-service.factory';
-import { CreateDietCalculationDto } from '../dto';
+import {CreateDietCalculationDto, MacronutrientsDto, MealDetailsDto} from '../dto';
 import { DietGoalType } from '../entities/user-nutrition-goal.entity';
-import {DietMeal} from "../entities";
+import {DietMeal, DietMealAlternative, DietMealAlternativeFood, DietMealFood} from "../entities";
 import {NutritionService} from "./nutrition.service";
+import {DietProcessPhase} from "../../diet/services/diet-processor.service";
+import {DietPlanGenerationDto} from "../dto/diet-macronutrients.dto";
 
 @Injectable()
 export class DietService {
@@ -635,73 +637,44 @@ export class DietService {
     /**
      * Processa o trabalho de planejamento de refeições (Fase 2)
      */
-    async processMealPlanningJob(jobId: string, calculationId: string, mealsPerDay: number): Promise<void> {
-        const job = await this.getDietJob(jobId);
-        const calculation = await this.getDietCalculation(calculationId);
-
+    async processMealPlanning(
+        jobId: string,
+        calculationId: string,
+        mealsPerDay: number
+    ): Promise<void> {
         try {
-            // Atualizar status para processando
-            await this.updateDietJob(jobId, {
-                status: DietJobStatusEnum.PROCESSING,
-                progress: 40
-            });
+            // Obter o cálculo existente
+            const calculation = await this.getDietCalculation(calculationId);
 
-            // Obter os planos gerados na Fase 1
-            if (!calculation.plans || calculation.plans.length === 0) {
-                throw new BadRequestException('No diet plans found from Phase 1 calculation');
-            }
-
-            // Obter preferências alimentares do usuário para personalização
-            const foodPreferences = await this.nutritionService.getUserFoodPreferences(job.userId);
-
-            // Preparar os dados para o prompt
-            const plans = calculation.plans.map(plan => ({
+            // Preparar planos para o prompt
+            const planPromptData = calculation.plans.map(plan => ({
                 name: plan.name,
                 totalCalories: plan.totalCalories,
-                application: plan.application || 'Plano padrão'
+                application: plan.application,
+                macronutrients: {
+                    protein: plan.protein,
+                    carbs: plan.carbs,
+                    fat: plan.fat
+                }
             }));
 
-            // Gerar prompt para distribuição de macronutrientes
-            const prompt = this.generateMealPlanningPrompt(plans, mealsPerDay);
+            // Gerar prompt
+            const prompt = this.generateMealPlanningPrompt(planPromptData, mealsPerDay);
 
-            // Chamar API de IA
-            await this.updateDietJob(jobId, { progress: 50 });
+            // Chamar serviço de IA
             const aiService = this.aiServiceFactory.getServiceWithFallback();
-            const response = await aiService.generateJsonCompletion(prompt);
+            const response = await aiService.generateJsonCompletion<DietPlanGenerationDto>(prompt);
 
-            // Processar a resposta
-            await this.updateDietJob(jobId, { progress: 70 });
-            const result = this.validateAndTransformMealPlanningResponse(response.content);
-
-            // Salvar os resultados no banco de dados
-            await this.updateDietJob(jobId, { progress: 80 });
-            await this.saveMealPlans(calculation.id, result);
-
-            // Atualizar o cálculo para indicar que a Fase 2 foi concluída
-            await this.updateDietCalculation(calculationId, { statusPhase: 2 });
-
-            // Atualizar job com os resultados
-            await this.updateDietJob(jobId, {
-                status: DietJobStatusEnum.COMPLETED,
-                progress: 100,
-                resultData: {
-                    ...job.resultData,
-                    phase2: {
-                        completedAt: new Date(),
-                        plansGenerated: calculation.plans.length
-                    }
-                }
-            });
+            // Processar e salvar resposta
+            await this.saveMealPlans(
+                jobId,     // Adicionando jobId
+                calculationId,  // Adicionando calculationId
+                response.content  // Dados da resposta da IA
+            );
 
         } catch (error) {
-            this.logger.error(`Error processing meal planning job: ${error.message}`, error.stack);
-
-            // Em caso de erro, atualizar o status e registrar o erro
-            await this.updateDietJob(jobId, {
-                status: DietJobStatusEnum.FAILED,
-                errorLogs: `Error in meal planning phase: ${error.message || 'Unknown error occurred'}`
-            });
-
+            // Tratamento de erro
+            this.logger.error(`Erro no planejamento de refeições: ${error.message}`);
             throw error;
         }
     }
@@ -761,66 +734,185 @@ export class DietService {
     /**
      * Salva os planos de refeições no banco de dados
      */
-    private async saveMealPlans(calculationId: string, data: any): Promise<void> {
-        // Implementar salvamento dos planos no banco de dados
+    private async saveMealPlans(
+        jobId: string,
+        calculationId: string,
+        planData: DietPlanGenerationDto
+    ): Promise<void> {
         const queryRunner = this.dataSource.createQueryRunner();
         await queryRunner.connect();
         await queryRunner.startTransaction();
 
         try {
-            // Obter o cálculo e seus planos existentes
+            // Obter o cálculo existente
             const calculation = await this.getDietCalculation(calculationId);
 
-            for (const planData of data.plans) {
-                // Encontrar o plano correspondente pelos nomes
-                const existingPlan = calculation.plans.find(p => p.name === planData.name);
+            for (const planInput of planData.plans) {
+                // Encontrar o plano correspondente
+                const existingPlan = calculation.plans.find(p => p.name === planInput.name);
 
                 if (existingPlan) {
-                    // Atualizar o plano com os macronutrientes calculados
-                    existingPlan.protein = planData.macronutrients.protein;
-                    existingPlan.carbs = planData.macronutrients.carbs;
-                    existingPlan.fat = planData.macronutrients.fat;
+                    // Atualizar plano com macronutrientes
+                    existingPlan.protein = planInput.macronutrients.protein;
+                    existingPlan.carbs = planInput.macronutrients.carbs;
+                    existingPlan.fat = planInput.macronutrients.fat;
 
                     await queryRunner.manager.save(existingPlan);
 
-                    // Criar as refeições para este plano
-                    for (let i = 0; i < planData.meals.length; i++) {
-                        const mealData = planData.meals[i];
+                    // Criar refeições para este plano
+                    if (planInput.meals) {
+                        for (let i = 0; i < planInput.meals.length; i++) {
+                            const mealData = planInput.meals[i];
 
-                        const meal = queryRunner.manager.create(DietMeal, {
-                            planId: existingPlan.id,
-                            name: mealData.name,
-                            sortOrder: i + 1,
-                            protein: mealData.macronutrients.protein,
-                            carbs: mealData.macronutrients.carbs,
-                            fat: mealData.macronutrients.fat,
-                            calories: this.calculateCalories(
-                                mealData.macronutrients.protein,
-                                mealData.macronutrients.carbs,
-                                mealData.macronutrients.fat
-                            ),
-                            isCustomized: false
-                        });
+                            const meal = queryRunner.manager.create(DietMeal, {
+                                planId: existingPlan.id,
+                                name: mealData.name,
+                                sortOrder: i + 1,
+                                protein: mealData.macronutrients.protein,
+                                carbs: mealData.macronutrients.carbs,
+                                fat: mealData.macronutrients.fat,
+                                calories: this.calculateMealCalories(mealData.macronutrients)
+                            });
 
-                        await queryRunner.manager.save(meal);
+                            await queryRunner.manager.save(meal);
+                        }
                     }
                 }
             }
 
+            // Atualizar status do job e cálculo
+            await this.updateDietJob(jobId, {
+                status: DietJobStatusEnum.COMPLETED,
+                progress: 100,
+                resultData: {
+                    calculationId,
+                    plansGenerated: planData.plans.length
+                }
+            });
+
+            await this.updateDietCalculation(calculationId, {
+                statusPhase: DietProcessPhase.MEAL_PLANNING
+            });
+
             await queryRunner.commitTransaction();
         } catch (error) {
             await queryRunner.rollbackTransaction();
+            this.logger.error(`Erro ao salvar planos de refeições: ${error.message}`, error.stack);
+
+            // Atualizar job com status de falha
+            await this.updateDietJob(jobId, {
+                status: DietJobStatusEnum.FAILED,
+                errorLogs: error.message
+            });
+
             throw error;
         } finally {
             await queryRunner.release();
         }
     }
 
-    /**
-     * Calcula as calorias a partir dos macronutrientes
-     */
-    private calculateCalories(protein: number, carbs: number, fat: number): number {
+    private calculateMealCalories(macronutrients: MacronutrientsDto): number {
+        // Calcular calorias baseado nos macronutrientes
         // 4 kcal por grama de proteína/carboidrato, 9 kcal por grama de gordura
-        return Math.round((protein * 4) + (carbs * 4) + (fat * 9));
+        return Math.round(
+            (macronutrients.protein * 4) +
+            (macronutrients.carbs * 4) +
+            (macronutrients.fat * 9)
+        );
+    }
+
+    async saveMealDetails(
+        mealId: string,
+        mealDetails: MealDetailsDto
+    ): Promise<void> {
+        const queryRunner = this.dataSource.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
+
+        try {
+            // Atualizar macronutrientes da refeição
+            await queryRunner.manager.update(DietMeal, mealId, {
+                protein: mealDetails.macronutrients.protein,
+                carbs: mealDetails.macronutrients.carbs,
+                fat: mealDetails.macronutrients.fat,
+                howTo: mealDetails.howTo
+            });
+
+            // Salvar alimentos da refeição
+            const mealFoods = mealDetails.foods.map((food, index) =>
+                queryRunner.manager.create(DietMealFood, {
+                    mealId,
+                    name: food.name,
+                    grams: food.grams,
+                    protein: food.macronutrients.protein,
+                    carbs: food.macronutrients.carbs,
+                    fat: food.macronutrients.fat,
+                    calories: this.calculateFoodCalories(food.macronutrients),
+                    sortOrder: index + 1
+                })
+            );
+            await queryRunner.manager.save(mealFoods);
+
+            // Salvar alternativas, se existirem
+            if (mealDetails.alternatives && mealDetails.alternatives.length > 0) {
+                const mealAlternatives = mealDetails.alternatives.map((alt, altIndex) => {
+                    const alternative = queryRunner.manager.create(DietMealAlternative, {
+                        originalMealId: mealId,
+                        name: `Alternativa ${altIndex + 1}`,
+                        protein: alt.macronutrients.protein,
+                        carbs: alt.macronutrients.carbs,
+                        fat: alt.macronutrients.fat,
+                        calories: this.calculateAlternativeCalories(alt.macronutrients),
+                        howTo: alt.howTo,
+                        sortOrder: altIndex + 1
+                    });
+
+                    // Salvar alimentos da alternativa
+                    const alternativeFoods = alt.foods.map((food, foodIndex) =>
+                        queryRunner.manager.create(DietMealAlternativeFood, {
+                            alternativeId: alternative.id,
+                            name: food.name,
+                            grams: food.grams,
+                            protein: food.macronutrients.protein,
+                            carbs: food.macronutrients.carbs,
+                            fat: food.macronutrients.fat,
+                            calories: this.calculateFoodCalories(food.macronutrients),
+                            sortOrder: foodIndex + 1
+                        })
+                    );
+
+                    return { alternative, foods: alternativeFoods };
+                });
+
+                // Salvar alternativas e seus alimentos
+                for (const { alternative, foods } of mealAlternatives) {
+                    const savedAlternative = await queryRunner.manager.save(alternative);
+                    await queryRunner.manager.save(foods.map(food => ({
+                        ...food,
+                        alternativeId: savedAlternative.id
+                    })));
+                }
+            }
+
+            await queryRunner.commitTransaction();
+        } catch (error) {
+            await queryRunner.rollbackTransaction();
+            this.logger.error(`Erro ao salvar detalhes da refeição: ${error.message}`, error.stack);
+            throw error;
+        } finally {
+            await queryRunner.release();
+        }
+    }
+
+    private calculateFoodCalories(macronutrients: MacronutrientsDto): number {
+        return Math.round(
+            (macronutrients.protein * 4) +
+            (macronutrients.carbs * 4) +
+            (macronutrients.fat * 9)
+        );
+    }
+
+    private calculateAlternativeCalories(macronutrients: MacronutrientsDto): number {
+        return this.calculateFoodCalories(macronutrients);
     }
 }

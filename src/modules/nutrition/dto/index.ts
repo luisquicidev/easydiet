@@ -35,3 +35,8 @@ export {
     DietProcessActivityDto,
     DietProcessStatusDto
 } from './create-diet-process.dto';
+
+export {
+    MealDetailsDto,
+    MealAlternativeDto
+} from './meal-details.dto';
