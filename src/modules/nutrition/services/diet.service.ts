@@ -11,7 +11,14 @@ import { UserActivity } from '../entities/user-activity.entity';
 import { AIServiceFactory } from '../../../shared/factories/ai-service.factory';
 import {CreateDietCalculationDto, MacronutrientsDto, MealDetailsDto} from '../dto';
 import { DietGoalType } from '../entities/user-nutrition-goal.entity';
-import {DietMeal, DietMealAlternative, DietMealAlternativeFood, DietMealFood} from "../entities";
+import {
+    DietMeal,
+    DietMealAlternative,
+    DietMealAlternativeFood,
+    DietMealFood, FoodPreferenceType,
+    UserBiometrics,
+    UserFoodPreference
+} from "../entities";
 import {NutritionService} from "./nutrition.service";
 import {DietProcessPhase} from "../../diet/services/diet-processor.service";
 import {DietPlanGenerationDto} from "../dto/diet-macronutrients.dto";
@@ -914,5 +921,252 @@ export class DietService {
 
     private calculateAlternativeCalories(macronutrients: MacronutrientsDto): number {
         return this.calculateFoodCalories(macronutrients);
+    }
+
+    /**
+     * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
+     * sem incluir a geração de alternativas
+     */
+    /**
+     * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
+     * priorizando as preferências alimentares do usuário
+     */
+    private generateFoodDetailingPrompt(
+        meal: DietMeal,
+        userPreferences: UserFoodPreference[],
+        mealPosition: number,
+        totalMeals: number,
+        dietType: string = 'balanced',
+        biometrics?: UserBiometrics
+    ): string {
+        // Extrair preferências e restrições alimentares
+        const preferences = userPreferences
+            .filter(p => p.type === FoodPreferenceType.PREFERENCE)
+            .map(p => p.description);
+
+        const restrictions = userPreferences
+            .filter(p => p.type === FoodPreferenceType.RESTRICTION)
+            .map(p => p.description);
+
+        const allergies = userPreferences
+            .filter(p => p.type === FoodPreferenceType.ALLERGY)
+            .map(p => p.description);
+
+        // Formatar macronutrientes da refeição
+        const macros = {
+            protein: meal.protein,
+            carbs: meal.carbs,
+            fat: meal.fat,
+            calories: meal.calories
+        };
+
+        // Determinar o tipo de refeição com base na posição
+        const mealType = this.determineMealType(mealPosition, totalMeals);
+
+        // Obter alimentos sugeridos com base no tipo de refeição
+        const suggestedFoods = this.getSuggestedFoodsForMealType(mealType, dietType);
+
+        // Obter diretrizes específicas para o tipo de dieta
+        const dietGuidelines = this.getDietTypeGuidelines(dietType);
+
+        // Obter recomendações de micronutrientes
+        const micronutrientGuidelines = this.getMicronutrientGuidelines(mealType);
+
+        // Texto condicional sobre preferências
+        const preferencesGuidance = preferences.length > 0
+            ? `- PRIORIZE EXCLUSIVAMENTE os alimentos listados nas preferências do usuário\n- Utilize apenas outros alimentos se as preferências não forem suficientes para compor a refeição completa`
+            : `- Utilize os alimentos sugeridos como base, mas sinta-se livre para incluir outras opções saudáveis`;
+
+        return `
+# Função e objetivo
+Você é um nutricionista especializado em detalhamento de refeições personalizadas, com foco em distribuição ideal de macro e micronutrientes.
+
+# Diretrizes
+- Detalhar com precisão os alimentos e quantidades para uma refeição específica
+- Distribuir os macronutrientes definidos de forma equilibrada entre alimentos reais
+- Priorizar alimentos integrais, frescos e minimamente processados
+${preferencesGuidance}
+- Respeitar RIGOROSAMENTE as restrições alimentares e alergias
+- Para cada alimento, especificar a quantidade em gramas e seus valores nutricionais
+- Balancear os micronutrientes relevantes para esta refeição
+${dietGuidelines}
+
+# Informações da refeição
+- Nome: ${meal.name}
+- Tipo: ${mealType} (${mealPosition}ª refeição de ${totalMeals})
+- Proteínas: ${macros.protein}g
+- Carboidratos: ${macros.carbs}g
+- Gorduras: ${macros.fat}g
+- Calorias totais: ${macros.calories}kcal
+
+# Contexto do usuário
+${biometrics ? `- Idade: ${biometrics.age} anos
+- Peso: ${biometrics.weight}kg
+- Altura: ${biometrics.height}cm
+- Sexo: ${biometrics.gender}` : '- Informações biométricas não disponíveis'}
+
+# Preferências alimentares (USE EXCLUSIVAMENTE ESTES ALIMENTOS, SE POSSÍVEL)
+${preferences.length > 0 ? preferences.map(p => `- ${p}`).join('\n') : '- Não especificadas'}
+
+# Restrições alimentares (NUNCA INCLUA ESTES ALIMENTOS)
+${restrictions.length > 0 ? restrictions.map(r => `- ${r}`).join('\n') : '- Não especificadas'}
+
+# Alergias (NUNCA INCLUA ESTES ALIMENTOS)
+${allergies.length > 0 ? allergies.map(a => `- ${a}`).join('\n') : '- Não especificadas'}
+
+${preferences.length === 0 ? `# Alimentos sugeridos (use apenas se necessário)
+${suggestedFoods.map(f => `- ${f}`).join('\n')}` : ''}
+
+# Micronutrientes importantes para esta refeição
+${micronutrientGuidelines}
+
+# Instruções
+1. Forneça uma lista detalhada de 4-6 alimentos para esta refeição, com quantidades em gramas
+2. IMPORTANTE: Use EXCLUSIVAMENTE alimentos listados nas preferências do usuário, a menos que não sejam suficientes
+3. Para cada alimento, especifique os macronutrientes (proteínas, carboidratos, gorduras)
+4. Inclua uma breve instrução de preparação da refeição em formato "passo a passo"
+5. Garanta que o total de macronutrientes respeite exatamente os valores definidos
+
+# Resposta
+Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou texto adicional:
+
+{
+  "name": "Nome da refeição",
+  "macronutrients": {
+    "protein": 0,
+    "carbs": 0,
+    "fat": 0
+  },
+  "foods": [
+    {
+      "name": "Nome do alimento",
+      "grams": 0,
+      "macronutrients": {
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0
+      }
+    }
+  ],
+  "howTo": "Instruções de preparação"
+}
+`;
+    }
+
+    /**
+     * Determina o tipo de refeição com base na posição e número total de refeições
+     */
+    private determineMealType(position: number, totalMeals: number): string {
+        if (totalMeals <= 3) {
+            // Esquema tradicional de 3 refeições
+            if (position === 1) return 'Café da manhã';
+            if (position === 2) return 'Almoço';
+            if (position === 3) return 'Jantar';
+        } else if (totalMeals === 4) {
+            // Esquema com 4 refeições
+            if (position === 1) return 'Café da manhã';
+            if (position === 2) return 'Lanche da manhã';
+            if (position === 3) return 'Almoço';
+            if (position === 4) return 'Jantar';
+        } else if (totalMeals === 5) {
+            // Esquema com 5 refeições
+            if (position === 1) return 'Café da manhã';
+            if (position === 2) return 'Lanche da manhã';
+            if (position === 3) return 'Almoço';
+            if (position === 4) return 'Lanche da tarde';
+            if (position === 5) return 'Jantar';
+        } else {
+            // Esquema com 6 ou mais refeições
+            if (position === 1) return 'Café da manhã';
+            if (position === 2) return 'Lanche da manhã';
+            if (position === 3) return 'Almoço';
+            if (position === 4) return 'Lanche da tarde';
+            if (position === 5) return 'Jantar';
+            if (position === 6) return 'Ceia';
+            if (position > 6) return `Refeição extra ${position - 6}`;
+        }
+
+        return 'Refeição não categorizada';
+    }
+
+    /**
+     * Retorna alimentos sugeridos para um tipo específico de refeição
+     */
+    private getSuggestedFoodsForMealType(mealType: string, dietType: string): string[] {
+        const commonFoods: Record<string, string[]> = {
+            'Café da manhã': [
+                'Ovos', 'Aveia', 'Pão integral', 'Iogurte', 'Frutas',
+                'Queijo cottage', 'Mel', 'Café', 'Leite', 'Granola'
+            ],
+            'Lanche da manhã': [
+                'Frutas', 'Iogurte', 'Castanhas', 'Smoothie', 'Barra de proteína',
+                'Queijo', 'Ovo cozido', 'Amendoim', 'Maçã com pasta de amendoim'
+            ],
+            'Almoço': [
+                'Arroz integral', 'Feijão', 'Frango', 'Peixe', 'Carne bovina',
+                'Salada verde', 'Legumes', 'Batata doce', 'Quinoa', 'Azeite'
+            ],
+            'Lanche da tarde': [
+                'Frutas', 'Torrada integral', 'Pasta de amendoim', 'Whey protein',
+                'Iogurte', 'Castanhas', 'Tapioca', 'Queijo branco', 'Omelete'
+            ],
+            'Jantar': [
+                'Frango', 'Peixe', 'Ovo', 'Legumes', 'Salada', 'Batata doce',
+                'Arroz integral', 'Abobrinha', 'Tofu', 'Macarrão integral'
+            ],
+            'Ceia': [
+                'Iogurte', 'Chá de camomila', 'Mingau de aveia', 'Caseína',
+                'Queijo cottage', 'Amêndoas', 'Banana', 'Leite morno'
+            ]
+        };
+
+        // Adicionar ou remover alimentos com base no tipo de dieta
+        if (dietType === 'low-carb') {
+            return (commonFoods[mealType] || [])
+                .filter(food => !['Arroz', 'Pão', 'Aveia', 'Granola', 'Batata', 'Macarrão', 'Tapioca'].some(carb => food.includes(carb)))
+                .concat(['Abacate', 'Coco', 'Ovos mexidos', 'Queijos', 'Oleaginosas']);
+        } else if (dietType === 'vegetarian') {
+            return (commonFoods[mealType] || [])
+                .filter(food => !['Frango', 'Peixe', 'Carne'].some(meat => food.includes(meat)))
+                .concat(['Tofu', 'Tempeh', 'Lentilha', 'Grão-de-bico', 'Proteína de ervilha']);
+        } else if (dietType === 'vegan') {
+            return (commonFoods[mealType] || [])
+                .filter(food => !['Frango', 'Peixe', 'Carne', 'Ovos', 'Leite', 'Queijo', 'Iogurte', 'Whey', 'Caseína'].some(animal => food.includes(animal)))
+                .concat(['Tofu', 'Tempeh', 'Lentilha', 'Grão-de-bico', 'Proteína de ervilha', 'Leite vegetal', 'Iogurte de coco']);
+        }
+
+        return commonFoods[mealType] || ['Alimentos variados e equilibrados'];
+    }
+
+    /**
+     * Retorna diretrizes específicas para um tipo de dieta
+     */
+    private getDietTypeGuidelines(dietType: string): string {
+        const guidelines: Record<string, string> = {
+            'balanced': '- Mantenha um equilíbrio entre proteínas, carboidratos e gorduras\n- Priorize carboidratos complexos e de baixo índice glicêmico\n- Inclua proteínas magras e gorduras saudáveis',
+            'low-carb': '- Mantenha os carboidratos abaixo de 25% do total calórico\n- Priorize gorduras saudáveis como fonte energética\n- Evite grãos, açúcares e amidos\n- Aumente a ingestão de vegetais não-amiláceos',
+            'high-protein': '- Garanta que cada refeição tenha pelo menos 25-30g de proteína\n- Distribua proteínas uniformemente ao longo do dia\n- Priorize proteínas de alto valor biológico\n- Limite gorduras saturadas',
+            'vegetarian': '- Combine diferentes fontes vegetais de proteína para perfil completo de aminoácidos\n- Inclua fontes de ferro não-heme, zinco e vitamina B12\n- Utilize ovos e laticínios para complementar aminoácidos essenciais',
+            'vegan': '- Combine diferentes fontes vegetais de proteína em cada refeição\n- Inclua alimentos fortificados com B12 ou considere suplementação\n- Priorize fontes de ômega-3 vegetal como linhaça e chia\n- Inclua alimentos ricos em ferro, zinco e cálcio',
+            'mediterranean': '- Priorize azeite de oliva extra-virgem como fonte principal de gordura\n- Inclua peixes e frutos do mar regularmente\n- Utilize ervas e especiarias em vez de sal\n- Base as refeições em vegetais, legumes e grãos integrais'
+        };
+
+        return guidelines[dietType] || guidelines['balanced'];
+    }
+
+    /**
+     * Retorna recomendações de micronutrientes importantes para o tipo de refeição
+     */
+    private getMicronutrientGuidelines(mealType: string): string {
+        const guidelines: Record<string, string> = {
+            'Café da manhã': '- Vitaminas do complexo B: importantes para o metabolismo energético no início do dia\n- Vitamina C: para absorção de ferro e função imunológica\n- Cálcio e vitamina D: para saúde óssea\n- Fibras solúveis: para controle glicêmico e saciedade',
+            'Lanche da manhã': '- Vitaminas antioxidantes (A, C, E): para combater radicais livres\n- Magnésio: para função muscular e nervosa\n- Proteínas de digestão rápida: para manutenção muscular',
+            'Almoço': '- Ferro: para transporte de oxigênio e combate à fadiga\n- Zinco: para função imune e hormonal\n- Fibras insolúveis: para saúde digestiva\n- Potássio: para equilíbrio eletrolítico e pressão arterial',
+            'Lanche da tarde': '- Magnésio e potássio: para recuperação muscular\n- Antioxidantes: para reduzir inflamação\n- Vitaminas do complexo B: para manter energia para o final do dia',
+            'Jantar': '- Triptofano: aminoácido precursor da serotonina e melatonina\n- Magnésio: para relaxamento muscular e qualidade do sono\n- Zinco: para recuperação tecidual durante o sono\n- Vitaminas do complexo B: para metabolismo e recuperação',
+            'Ceia': '- Triptofano e magnésio: para promover sono de qualidade\n- Cálcio: para recuperação muscular durante o sono\n- Proteínas de digestão lenta: para manutenção muscular durante o período noturno'
+        };
+
+        return guidelines[mealType] || '- Variedade de vitaminas e minerais para garantir nutrição equilibrada\n- Atenção à hidratação e eletrólitos\n- Combinação adequada de macro e micronutrientes';
     }
 }
