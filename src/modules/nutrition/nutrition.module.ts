@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import {forwardRef, Module} from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MetReference } from './entities/met-reference.entity';
 import { UserBiometrics } from './entities/user-biometrics.entity';
@@ -21,6 +21,7 @@ import { DietService } from './services/diet.service';
 import { UsersModule } from '../users/users.module';
 // Importar o módulo de IA
 import { AIModule } from '../../shared/ai/ai.module';
+import {DietModule} from "../diet/diet.module";
 
 @Module({
     imports: [
@@ -45,7 +46,7 @@ import { AIModule } from '../../shared/ai/ai.module';
             DietMealAlternativeFood,
         ]),
         UsersModule,
-        // Adicionando o módulo de IA
+        forwardRef(() => DietModule),
         AIModule,
     ],
     controllers: [NutritionController],

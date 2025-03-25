@@ -38,5 +38,4 @@ export {
 
 export {
     MealDetailsDto,
-    MealAlternativeDto
 } from './meal-details.dto';

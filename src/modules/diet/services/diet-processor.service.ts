@@ -1,10 +1,14 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {forwardRef, Inject, Injectable, Logger} from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue, Job } from 'bull';
 import { DietService } from '../../nutrition/services/diet.service';
 import { DietGenerationJob, DietJobStatusEnum } from '../../nutrition/entities/diet-generation-job.entity';
 import { NutritionService } from '../../nutrition/services/nutrition.service';
 import { DietCalculation } from '../../nutrition/entities/diet-calculation.entity';
+import {DietMeal, DietPlan, FoodPreferenceType} from "../../nutrition/entities";
+import {MealDetailsDto} from "../../nutrition/dto";
+import {AIServiceFactory} from "../../../shared/factories/ai-service.factory";
+import {DietGoalType} from "../../nutrition/entities/user-nutrition-goal.entity";
 
 export enum DietProcessPhase {
     CALCULATION = 1,
@@ -39,8 +43,10 @@ export class DietProcessorService {
     constructor(
         @InjectQueue('diet-generation')
         private readonly dietQueue: Queue,
+        @Inject(forwardRef(() => DietService))
         private readonly dietService: DietService,
         private readonly nutritionService: NutritionService,
+        private readonly aiServiceFactory: AIServiceFactory,
     ) {}
 
     /**
@@ -293,15 +299,198 @@ export class DietProcessorService {
         this.logger.log(`Processing food detailing for user ${userId}, jobId ${jobId}, planId ${planId}, mealId ${mealId}`);
 
         try {
-            // Processar o detalhamento de alimentos
-            // Implementar quando tivermos o DietService.processFoodDetailingJob
-            // await this.dietService.processFoodDetailingJob(jobId, planId, mealId);
+            // Atualizar progresso inicial
+            await job.progress(10);
 
-            // Por enquanto, apenas simulamos a conclusão do processo
-            this.logger.log(`Food detailing completed for meal ${mealId}`);
+            // 1. Obter dados necessários
+            // Obter o plano de dieta
+            const plan = await this.dietService.getDietPlan(planId);
+
+            // Verificar se o plano pertence ao usuário
+            if (plan.userId !== userId) {
+                throw new Error(`Plan ${planId} does not belong to user ${userId}`);
+            }
+
+            // Obter a refeição específica
+            const meal = plan.meals?.find(m => m.id === mealId);
+            if (!meal) {
+                throw new Error(`Meal ${mealId} not found in plan ${planId}`);
+            }
+
+            // Atualizar progresso
+            await job.progress(20);
+
+            // 2. Obter preferências alimentares do usuário
+            const foodPreferences = await this.nutritionService.getUserFoodPreferences(userId);
+
+            // 3. Obter dados biométricos para contexto
+            let biometrics;
+            try {
+                biometrics = await this.nutritionService.getUserBiometrics(userId);
+            } catch (error) {
+                this.logger.warn(`Biometrics not found for user ${userId}, proceeding without them`);
+            }
+
+            // Atualizar progresso
+            await job.progress(30);
+
+            // 4. Determinar a posição da refeição no plano
+            const mealPosition = plan.meals?.findIndex(m => m.id === mealId) + 1 || 1;
+            const totalMeals = plan.meals?.length || 1;
+
+            // 5. Determinar o tipo de dieta com base no objetivo do usuário
+            let dietType = 'balanced';
+            try {
+                const nutrition = await this.nutritionService.getUserNutritionGoal(userId);
+                if (nutrition) {
+                    // Mapear o objetivo para um tipo de dieta
+                    switch (nutrition.goalType) {
+                        case DietGoalType.WEIGHT_LOSS:
+                            dietType = nutrition.calorieAdjustment <= -15 ? 'low-carb' : 'balanced';
+                            break;
+                        case DietGoalType.WEIGHT_GAIN:
+                            dietType = 'high-protein';
+                            break;
+                        default:
+                            dietType = 'balanced';
+                    }
+                }
+            } catch (error) {
+                this.logger.warn(`Nutrition goal not found for user ${userId}, using balanced diet type`);
+            }
+
+            // Atualizar progresso
+            await job.progress(40);
+
+            // 6. Preparar informações para o prompt
+            // Formatar as preferências alimentares para o prompt
+            const preferencesText = foodPreferences.map(pref =>
+                `${pref.type === FoodPreferenceType.PREFERENCE ? "Preferência" :
+                    pref.type === FoodPreferenceType.RESTRICTION ? "Restrição" :
+                        "Alergia"}: ${pref.description}`
+            ).join('\n');
+
+            // 7. Gerar prompt para o modelo de IA
+            const prompt = this.dietService.generateFoodDetailingPrompt(
+                meal,
+                foodPreferences,
+                mealPosition,
+                totalMeals,
+                dietType,
+                biometrics
+            );
+
+            // Atualizar progresso
+            await job.progress(50);
+
+            // 8. Chamar a API de IA para obter o detalhamento
+            const aiService = this.aiServiceFactory.getServiceWithFallback();
+            const response = await aiService.generateJsonCompletion<MealDetailsDto>(prompt);
+
+            if (!response || !response.content) {
+                throw new Error('Failed to generate meal details from AI');
+            }
+
+            // Validar a resposta da IA
+            this.validateMealDetailsResponse(response.content, meal);
+
+            // Atualizar progresso
+            await job.progress(70);
+
+            // 9. Salvar os detalhes dos alimentos no banco de dados
+            await this.dietService.saveMealDetails(mealId, response.content);
+
+            // 10. Atualizar o job como concluído
+            await job.progress(90);
+
+            // 11. Verificar se todas as refeições do plano estão detalhadas
+            const allMealsDetailed = await this.checkAllMealsDetailed(plan);
+
+            // 12. Se todas as refeições estiverem detalhadas, atualizar o status do cálculo
+            if (allMealsDetailed) {
+                const calculation = await this.dietService.getDietCalculation(plan.calculationId);
+                await this.dietService.updateDietCalculation(calculation.id, {
+                    statusPhase: DietProcessPhase.FOOD_DETAILING
+                });
+
+                // Atualizar o job principal
+                await this.dietService.updateDietJob(jobId, {
+                    status: DietJobStatusEnum.COMPLETED,
+                    progress: 100,
+                    resultData: {
+                        ...job.data,
+                        calculationId: plan.calculationId,
+                        completed: true
+                    }
+                });
+            }
+
+            // Atualizar progresso final
+            await job.progress(100);
+            this.logger.log(`Food detailing completed successfully for meal ${mealId}`);
+
         } catch (error) {
             this.logger.error(`Error processing food detailing: ${error.message}`, error.stack);
+
+            // Atualizar job com status de falha
+            try {
+                await this.dietService.updateDietJob(jobId, {
+                    status: DietJobStatusEnum.FAILED,
+                    errorLogs: `Error detailing foods: ${error.message}`
+                });
+            } catch (updateError) {
+                this.logger.error(`Failed to update job status: ${updateError.message}`);
+            }
+
             throw error;
         }
+    }
+
+    /**
+     * Valida a resposta da IA para o detalhamento da refeição
+     */
+    private validateMealDetailsResponse(response: MealDetailsDto, originalMeal: DietMeal): void {
+        // Verificar se a resposta contém os campos necessários
+        if (!response.foods || response.foods.length === 0) {
+            throw new Error('AI response does not contain any foods');
+        }
+
+        // Verificar se os macronutrientes estão próximos aos valores originais
+        // Permitir uma margem de erro de 5%
+        const proteinDiff = Math.abs(response.macronutrients.protein - originalMeal.protein);
+        const carbsDiff = Math.abs(response.macronutrients.carbs - originalMeal.carbs);
+        const fatDiff = Math.abs(response.macronutrients.fat - originalMeal.fat);
+
+        const proteinTolerance = originalMeal.protein * 0.05;
+        const carbsTolerance = originalMeal.carbs * 0.05;
+        const fatTolerance = originalMeal.fat * 0.05;
+
+        if (proteinDiff > proteinTolerance || carbsDiff > carbsTolerance || fatDiff > fatTolerance) {
+            this.logger.warn(`AI response macronutrients differ from original meal by more than 5%:`);
+            this.logger.warn(`Original: P:${originalMeal.protein}, C:${originalMeal.carbs}, F:${originalMeal.fat}`);
+            this.logger.warn(`Response: P:${response.macronutrients.protein}, C:${response.macronutrients.carbs}, F:${response.macronutrients.fat}`);
+            // Ajustamos os macronutrientes para corresponder aos originais
+            response.macronutrients.protein = originalMeal.protein;
+            response.macronutrients.carbs = originalMeal.carbs;
+            response.macronutrients.fat = originalMeal.fat;
+        }
+    }
+
+    /**
+     * Verifica se todas as refeições do plano estão detalhadas
+     */
+    private async checkAllMealsDetailed(plan: DietPlan): Promise<boolean> {
+        if (!plan.meals || plan.meals.length === 0) {
+            return false;
+        }
+
+        // Uma refeição está detalhada se tiver alimentos associados
+        for (const meal of plan.meals) {
+            if (!meal.foods || meal.foods.length === 0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

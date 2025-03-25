@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import {forwardRef, Module} from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bull';
 import { DietGenerationJob } from '../nutrition/entities/diet-generation-job.entity';
@@ -15,6 +15,7 @@ import { DietProcessorService } from './services/diet-processor.service';
 import { DietQueueProcessor } from './processors/diet-queue.processor';
 import { NutritionModule } from '../nutrition/nutrition.module';
 import { AIModule } from '../../shared/ai/ai.module';
+import {DietService} from "../nutrition/services/diet.service";
 
 @Module({
     imports: [
@@ -43,7 +44,7 @@ import { AIModule } from '../../shared/ai/ai.module';
                 removeOnFail: 100, // Mantém os últimos 100 jobs que falharam para análise
             },
         }),
-        NutritionModule,
+        forwardRef(() => NutritionModule),
         AIModule,
     ],
     controllers: [DietController],

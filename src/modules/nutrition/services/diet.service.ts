@@ -931,7 +931,7 @@ export class DietService {
      * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
      * priorizando as preferências alimentares do usuário
      */
-    private generateFoodDetailingPrompt(
+    generateFoodDetailingPrompt(
         meal: DietMeal,
         userPreferences: UserFoodPreference[],
         mealPosition: number,
