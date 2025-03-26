@@ -123,26 +123,67 @@ export class DietProcessorService {
     ): Promise<Job<MealPlanningData>> {
         this.logger.log(`Queueing meal planning for user ${userId}, jobId ${jobId}, calculationId ${calculationId}, mealsPerDay ${mealsPerDay}`);
 
-        const jobData: MealPlanningData = {
-            userId,
-            jobId,
-            calculationId,
-            mealsPerDay
-        };
-
         try {
-            // Atualizar o job para indicar que a fase 2 está pendente
-            const updatedJob = await this.dietService.updateDietJob(jobId, {
+            // Obter o cálculo existente
+            let calculation = await this.dietService.getDietCalculation(calculationId);
+
+            // Validar se há planos para processar
+            if (!calculation.plans || calculation.plans.length === 0) {
+                this.logger.warn(`No plans found for calculation ${calculationId}. Generating default plans.`);
+
+                // Criar planos padrão se não existirem
+                const defaultPlans = [
+                    {
+                        name: 'Plano Padrão',
+                        totalCalories: Math.round(calculation.ger),
+                        application: 'Dia normal'
+                    },
+                    {
+                        name: 'Dias de Treino',
+                        totalCalories: Math.round(calculation.ger * 1.2),
+                        application: 'Dias com atividade física intensa'
+                    }
+                ];
+
+                // Salvar planos padrão
+                for (const planData of defaultPlans) {
+                    await this.dietService.createDietPlan({
+                        userId,
+                        jobId,
+                        calculationId,
+                        name: planData.name,
+                        totalCalories: planData.totalCalories,
+                        application: planData.application,
+                        protein: Math.round(planData.totalCalories * 0.3 / 4), // 30% proteína
+                        carbs: Math.round(planData.totalCalories * 0.4 / 4), // 40% carboidratos
+                        fat: Math.round(planData.totalCalories * 0.3 / 9) // 30% gordura
+                    });
+                }
+
+                // Recarregar o cálculo com os novos planos
+                calculation = await this.dietService.getDietCalculation(calculationId);
+            }
+
+            // Preparar dados do job
+            const jobData: MealPlanningData = {
+                userId,
+                jobId,
+                calculationId,
+                mealsPerDay
+            };
+
+            // Atualizar job para indicar processamento
+            await this.dietService.updateDietJob(jobId, {
                 status: DietJobStatusEnum.PROCESSING,
                 progress: 33, // 1/3 do processo concluído
             });
-            this.logger.log(`Job atualizado após enfileirar planejamento de refeições: ${JSON.stringify(updatedJob, null, 2)}`);
 
-            // Atualizar o cálculo para indicar que estamos na fase 2
-            const updatedCalculation = await this.updateCalculationPhase(calculationId, DietProcessPhase.MEAL_PLANNING);
-            this.logger.log(`Cálculo atualizado após mudança de fase: ${JSON.stringify(updatedCalculation, null, 2)}`);
+            // Atualizar status do cálculo
+            await this.dietService.updateDietCalculation(calculationId, {
+                statusPhase: DietProcessPhase.MEAL_PLANNING
+            });
 
-            // Adicionar à fila Bull
+            // Adicionar job à fila Bull
             const job = await this.dietQueue.add('meal-planning', jobData, {
                 attempts: 3,
                 backoff: {
@@ -153,10 +194,18 @@ export class DietProcessorService {
                 removeOnFail: false,
             });
 
-            this.logger.log(`Added job ${job.id} to queue`);
+            this.logger.log(`Added job ${job.id} to queue for meal planning`);
             return job;
+
         } catch (error) {
             this.logger.error(`Erro ao enfileirar planejamento de refeições: ${error.message}`, error.stack);
+
+            // Atualizar job com status de falha
+            await this.dietService.updateDietJob(jobId, {
+                status: DietJobStatusEnum.FAILED,
+                errorLogs: `Erro ao enfileirar planejamento de refeições: ${error.message}`
+            });
+
             throw error;
         }
     }

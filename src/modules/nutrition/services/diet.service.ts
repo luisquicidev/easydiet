@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import {Injectable, NotFoundException, BadRequestException, Logger, Inject, forwardRef} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { DietGenerationJob, DietJobStatusEnum } from '../entities/diet-generation-job.entity';
@@ -20,7 +20,7 @@ import {
     UserFoodPreference
 } from "../entities";
 import {NutritionService} from "./nutrition.service";
-import {DietProcessPhase} from "../../diet/services/diet-processor.service";
+import {DietProcessorService, DietProcessPhase} from "../../diet/services/diet-processor.service";
 import {DietPlanGenerationDto} from "../dto/diet-macronutrients.dto";
 
 @Injectable()
@@ -48,7 +48,9 @@ export class DietService {
 
         private dataSource: DataSource,
         private aiServiceFactory: AIServiceFactory,
-        private nutritionService: NutritionService
+        @Inject(forwardRef(() => DietProcessorService))
+        private readonly dietProcessorService: DietProcessorService,
+        private readonly nutritionService: NutritionService
     ) {}
 
     // Métodos existentes para DietGenerationJob
@@ -203,6 +205,25 @@ export class DietService {
                 }
             });
 
+            const userId = job.userId;
+
+            let mealsPerDay = 4; // Valor padrão
+            try {
+                const nutritionGoal = await this.nutritionService.getUserNutritionGoal(userId);
+                mealsPerDay = nutritionGoal?.mealsPerDay || 4;
+            } catch (goalError) {
+                this.logger.warn(`Could not retrieve nutrition goal for user ${userId}: ${goalError.message}`);
+            }
+
+            // Após salvar os cálculos e planos, iniciar planejamento de refeições
+            if (calculation.id) {
+                await this.dietProcessorService.queueMealPlanning(
+                    userId,
+                    job.id,
+                    calculation.id,
+                    mealsPerDay
+                );
+            }
         } catch (error) {
             this.logger.error(`Error processing metabolic calculation job: ${error.message}`, error.stack);
 
