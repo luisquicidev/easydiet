@@ -46,6 +46,9 @@ export class DietService {
         @InjectRepository(MetReference)
         private metReferenceRepository: Repository<MetReference>,
 
+        @InjectRepository(DietMeal)
+        private dietMealRepository: Repository<DietMeal>,
+
         private dataSource: DataSource,
         private aiServiceFactory: AIServiceFactory,
         @Inject(forwardRef(() => DietProcessorService))
@@ -462,6 +465,7 @@ export class DietService {
 
     /**
      * Salva os dados de cálculo de dieta no banco de dados
+     * Inativa planos anteriores quando novos planos são gerados
      */
     async saveDietCalculation(userId: number, jobId: string, data: CreateDietCalculationDto): Promise<DietCalculation> {
         // Usar uma transaction para garantir que todos os dados sejam salvos ou nenhum
@@ -470,6 +474,10 @@ export class DietService {
         await queryRunner.startTransaction();
 
         try {
+            // Inativar planos anteriores do usuário
+            await queryRunner.manager.update(DietPlan, { userId, isActive: true }, { isActive: false });
+            this.logger.log(`Planos anteriores do usuário ${userId} foram inativados`);
+
             // 1. Criar o registro de cálculo
             const calculation = queryRunner.manager.create(DietCalculation, {
                 userId,
@@ -563,12 +571,14 @@ export class DietService {
                         carbs: carbsGrams,
                         fat: fatGrams,
                         application: plan.application,
-                        isActive: true
+                        isActive: true // Novos planos são ativos por padrão
                     });
                 });
 
                 const savedPlans = await queryRunner.manager.save(planEntities);
                 savedCalculation.plans = savedPlans;
+
+                this.logger.log(`${savedPlans.length} novos planos criados para o usuário ${userId}`);
             }
 
             // Commit da transaction
@@ -948,10 +958,6 @@ export class DietService {
      * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
      * sem incluir a geração de alternativas
      */
-    /**
-     * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
-     * priorizando as preferências alimentares do usuário
-     */
     generateFoodDetailingPrompt(
         meal: DietMeal,
         userPreferences: UserFoodPreference[],
@@ -1189,5 +1195,21 @@ Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou text
         };
 
         return guidelines[mealType] || '- Variedade de vitaminas e minerais para garantir nutrição equilibrada\n- Atenção à hidratação e eletrólitos\n- Combinação adequada de macro e micronutrientes';
+    }
+
+    /**
+     * Obtém uma refeição específica com seus alimentos
+     */
+    async getMeal(mealId: string): Promise<DietMeal> {
+        const meal = await this.dietMealRepository.findOne({
+            where: { id: mealId },
+            relations: ['foods', 'alternatives', 'alternatives.foods']
+        });
+
+        if (!meal) {
+            throw new NotFoundException(`Refeição com ID "${mealId}" não encontrada`);
+        }
+
+        return meal;
     }
 }
