@@ -30,6 +30,7 @@ export class DietController {
     /**
      * Endpoint para cálculo metabólico
      * Calcula TMB, GET e define planos calóricos básicos (Fase 1)
+     * Versão atualizada para processamento síncrono
      */
     @Post('calculate-metabolism')
     async calculateMetabolism(@Body() createDietDto: CreateDietProcessDto, @Request() req) {
@@ -94,42 +95,35 @@ export class DietController {
                 dailyActivity: createDietDto.additionalInstructions || '',
             });
 
-            // Atualizar status para processando
-            await this.dietService.updateDietJob(job.id, {
-                status: DietJobStatusEnum.PROCESSING,
-                progress: 10
-            });
-
+            // Processar o job de forma síncrona
             try {
-                // Executar o cálculo metabólico sincronamente
-                const result = await this.dietService.processMetabolicCalculationJob(job.id);
+                // Executar o cálculo metabólico e obter o resultado
+                const calculation = await this.dietService.processMetabolicCalculationJob(job.id);
 
-                // Atualizar status para concluído EXPLICITAMENTE
-                await this.dietService.updateDietJob(job.id, {
-                    status: DietJobStatusEnum.COMPLETED,
-                    progress: 100
-                });
-
-                // Buscar o job atualizado
+                // Buscar o job atualizado para confirmar o status
                 const updatedJob = await this.dietService.getDietJob(job.id);
-                const calculationId = updatedJob.resultData?.calculationId;
-                const plans = updatedJob.resultData?.plans || [];
 
                 return {
                     success: true,
                     message: 'Cálculo metabólico concluído com sucesso',
                     jobId: job.id,
-                    calculationId: calculationId,
+                    calculationId: calculation.id,
                     phase: DietProcessPhase.CALCULATION,
-                    plans: plans
+                    plans: calculation.plans.map(plan => ({
+                        id: plan.id,
+                        name: plan.name,
+                        totalCalories: plan.totalCalories,
+                        macronutrients: {
+                            protein: plan.protein,
+                            carbs: plan.carbs,
+                            fat: plan.fat
+                        },
+                        application: plan.application
+                    }))
                 };
             } catch (error) {
-                // Se houver erro no processamento, registrar falha
-                await this.dietService.updateDietJob(job.id, {
-                    status: DietJobStatusEnum.FAILED,
-                    errorLogs: error.message || 'Erro no processamento',
-                    progress: 0
-                });
+                // Em caso de erro, garantir que o status do job seja atualizado
+                this.logger.error(`Erro no processamento do cálculo metabólico: ${error.message}`, error.stack);
 
                 throw error;
             }
@@ -144,6 +138,7 @@ export class DietController {
     /**
      * Endpoint para planejamento de refeições (Fase 2)
      * Distribui macronutrientes em refeições ao longo do dia
+     * Versão atualizada para processamento síncrono
      */
     @Post('plan-meals')
     async planMeals(
@@ -168,64 +163,106 @@ export class DietController {
             // Número de refeições por dia (usar valor do corpo da requisição ou do objetivo nutricional)
             const mealsPerDay = body.mealsPerDay || await this.getDefaultMealsPerDay(userId);
 
-            // Preparar planos para o prompt
-            const planPromptData = calculation.plans.map(plan => ({
-                name: plan.name,
-                totalCalories: plan.totalCalories,
-                application: plan.application,
-                macronutrients: {
-                    protein: plan.protein,
-                    carbs: plan.carbs,
-                    fat: plan.fat
-                }
-            }));
-
-            // Gerar prompt para planejamento de refeições
-            const prompt = this.dietService.generateMealPlanningPrompt(planPromptData, mealsPerDay);
-
-            // Chamar serviço de IA
-            const aiService = this.aiServiceFactory.getServiceWithFallback();
-            const response = await aiService.generateJsonCompletion(prompt);
-
-            // Salvar as refeições para cada plano
-            await this.dietService.saveMealPlans(
-                calculation.jobId,
-                body.calculationId,
-                response.content as DietPlanGenerationDto
-            );
-
-            // Atualizar a fase do cálculo
-            await this.dietService.updateDietCalculation(body.calculationId, {
-                statusPhase: DietProcessPhase.MEAL_PLANNING
+            // Criar um novo job para o planejamento de refeições
+            const job = await this.dietService.createDietJob(userId, 'meal_planning', {
+                calculationId: body.calculationId,
+                mealsPerDay: mealsPerDay
             });
 
-            // Obter os planos atualizados com as refeições
-            const updatedPlans = await Promise.all(
-                calculation.plans.map(plan => this.dietService.getDietPlan(plan.id))
-            );
+            // Atualizar o status do job para "processando"
+            await this.dietService.updateDietJob(job.id, {
+                status: DietJobStatusEnum.PROCESSING,
+                progress: 10
+            });
 
-            // Preparar resposta
-            return {
-                success: true,
-                message: 'Planejamento de refeições concluído com sucesso',
-                calculationId: body.calculationId,
-                plans: updatedPlans.map(plan => ({
-                    id: plan.id,
+            try {
+                // Preparar planos para o prompt
+                const planPromptData = calculation.plans.map(plan => ({
                     name: plan.name,
                     totalCalories: plan.totalCalories,
-                    mealsCount: plan.meals?.length || 0,
-                    meals: plan.meals?.map(meal => ({
-                        id: meal.id,
-                        name: meal.name,
-                        macronutrients: {
-                            protein: meal.protein,
-                            carbs: meal.carbs,
-                            fat: meal.fat,
-                            calories: meal.calories
-                        }
+                    application: plan.application,
+                    macronutrients: {
+                        protein: plan.protein,
+                        carbs: plan.carbs,
+                        fat: plan.fat
+                    }
+                }));
+
+                // Gerar prompt para planejamento de refeições
+                const prompt = this.dietService.generateMealPlanningPrompt(planPromptData, mealsPerDay);
+
+                // Atualizar progresso
+                await this.dietService.updateDietJob(job.id, { progress: 30 });
+
+                // Chamar serviço de IA
+                const aiService = this.aiServiceFactory.getServiceWithFallback();
+                const response = await aiService.generateJsonCompletion(prompt);
+
+                // Atualizar progresso
+                await this.dietService.updateDietJob(job.id, { progress: 60 });
+
+                // Salvar as refeições para cada plano
+                await this.dietService.saveMealPlans(
+                    job.id,
+                    body.calculationId,
+                    response.content as DietPlanGenerationDto
+                );
+
+                // Atualizar a fase do cálculo
+                await this.dietService.updateDietCalculation(body.calculationId, {
+                    statusPhase: DietProcessPhase.MEAL_PLANNING
+                });
+
+                // Atualizar status do job para completado
+                await this.dietService.updateDietJob(job.id, {
+                    status: DietJobStatusEnum.COMPLETED,
+                    progress: 100,
+                    resultData: {
+                        calculationId: body.calculationId,
+                        mealsPerDay: mealsPerDay
+                    }
+                });
+
+                // Obter os planos atualizados com as refeições
+                const updatedPlans = await Promise.all(
+                    calculation.plans.map(plan => this.dietService.getDietPlan(plan.id))
+                );
+
+                // Preparar resposta
+                return {
+                    success: true,
+                    message: 'Planejamento de refeições concluído com sucesso',
+                    jobId: job.id,
+                    calculationId: body.calculationId,
+                    phase: DietProcessPhase.MEAL_PLANNING,
+                    plans: updatedPlans.map(plan => ({
+                        id: plan.id,
+                        name: plan.name,
+                        totalCalories: plan.totalCalories,
+                        mealsCount: plan.meals?.length || 0,
+                        meals: plan.meals?.map(meal => ({
+                            id: meal.id,
+                            name: meal.name,
+                            macronutrients: {
+                                protein: meal.protein,
+                                carbs: meal.carbs,
+                                fat: meal.fat,
+                                calories: meal.calories
+                            }
+                        }))
                     }))
-                }))
-            };
+                };
+            } catch (error) {
+                // Em caso de erro, atualizar o status do job
+                this.logger.error(`Erro no processamento do planejamento de refeições: ${error.message}`, error.stack);
+                await this.dietService.updateDietJob(job.id, {
+                    status: DietJobStatusEnum.FAILED,
+                    errorLogs: error.message || 'Erro desconhecido durante o planejamento de refeições',
+                    progress: 0
+                });
+
+                throw error;
+            }
         } catch (error) {
             this.logger.error(`Erro no planejamento de refeições: ${error.message}`, error.stack);
             throw error;
@@ -237,6 +274,7 @@ export class DietController {
     /**
      * Endpoint para detalhamento de alimentos (Fase 3)
      * Define os alimentos específicos para uma refeição
+     * Versão atualizada para processamento síncrono
      */
     @Post('detail-foods')
     async detailFoods(
@@ -261,87 +299,159 @@ export class DietController {
                 throw new NotFoundException('Plano não encontrado');
             }
 
-            // Obter preferências alimentares do usuário
-            const foodPreferences = await this.nutritionService.getUserFoodPreferences(userId);
-
-            // Obter dados biométricos (opcional, para contexto)
-            let biometrics;
-            try {
-                biometrics = await this.nutritionService.getUserBiometrics(userId);
-            } catch (error) {
-                this.logger.warn(`Biometrics not found for user ${userId}, proceeding without them`);
+            // Verificar se a Fase 2 está completa
+            const calculation = await this.dietService.getDietCalculation(plan.calculationId);
+            if (calculation.statusPhase < DietProcessPhase.MEAL_PLANNING) {
+                throw new BadRequestException('O planejamento de refeições (Fase 2) precisa ser concluído antes');
             }
 
-            // Determinar a posição da refeição no plano
-            const mealPosition = plan.meals?.findIndex(m => m.id === meal.id) + 1 || 1;
-            const totalMeals = plan.meals?.length || 1;
-
-            // Determinar tipo de dieta com base no objetivo do usuário
-            const dietType = await this.getDietTypeFromUserGoal(userId);
-
-            // Gerar prompt para detalhamento de alimentos
-            const prompt = this.dietService.generateFoodDetailingPrompt(
-                meal,
-                foodPreferences,
-                mealPosition,
-                totalMeals,
-                dietType,
-                biometrics
-            );
-
-            // Chamar serviço de IA
-            const aiService = this.aiServiceFactory.getServiceWithFallback();
-            const response = await aiService.generateJsonCompletion(prompt);
-
-            // Validar resposta
-            if (!response || !response.content) {
-                throw new Error('Falha ao gerar detalhes da refeição');
-            }
-
-            // Salvar os detalhes dos alimentos
-            await this.dietService.saveMealDetails(meal.id, response.content as MealDetailsDto);
-
-            // Obter a refeição atualizada com os alimentos detalhados
-            const updatedMeal = await this.dietService.getMeal(meal.id);
-
-            // Verificar se todas as refeições do plano já foram detalhadas
-            const allMealsDetailed = await this.areAllMealsDetailed(plan.id);
-
-            // Se todas as refeições estiverem detalhadas, atualizar o status
-            if (allMealsDetailed) {
-                await this.dietService.updateDietCalculation(plan.calculationId, {
-                    statusPhase: DietProcessPhase.FOOD_DETAILING
-                });
-            }
-
-            // Preparar resposta
-            return {
-                success: true,
-                message: 'Detalhamento de alimentos concluído com sucesso',
-                mealId: meal.id,
+            // Criar um job para rastreamento do detalhamento de alimentos
+            const job = await this.dietService.createDietJob(userId, 'food_detailing', {
+                mealId: body.mealId,
                 planId: plan.id,
-                meal: {
-                    name: updatedMeal.name,
-                    macronutrients: {
-                        protein: updatedMeal.protein,
-                        carbs: updatedMeal.carbs,
-                        fat: updatedMeal.fat,
-                        calories: updatedMeal.calories
-                    },
-                    foods: updatedMeal.foods?.map(food => ({
-                        name: food.name,
-                        grams: food.grams,
-                        macronutrients: {
-                            protein: food.protein,
-                            carbs: food.carbs,
-                            fat: food.fat,
-                            calories: food.calories
-                        }
-                    })),
-                    howTo: updatedMeal.howTo,
-                    allMealsDetailed: allMealsDetailed
+                calculationId: plan.calculationId
+            });
+
+            // Atualizar status para processando
+            await this.dietService.updateDietJob(job.id, {
+                status: DietJobStatusEnum.PROCESSING,
+                progress: 10
+            });
+
+            try {
+                // Obter preferências alimentares do usuário
+                const foodPreferences = await this.nutritionService.getUserFoodPreferences(userId);
+
+                // Obter dados biométricos (opcional, para contexto)
+                let biometrics;
+                try {
+                    biometrics = await this.nutritionService.getUserBiometrics(userId);
+                } catch (error) {
+                    this.logger.warn(`Biometrics not found for user ${userId}, proceeding without them`);
                 }
-            };
+
+                // Determinar a posição da refeição no plano
+                const mealPosition = plan.meals?.findIndex(m => m.id === meal.id) + 1 || 1;
+                const totalMeals = plan.meals?.length || 1;
+
+                // Atualizar progresso
+                await this.dietService.updateDietJob(job.id, { progress: 30 });
+
+                // Determinar tipo de dieta com base no objetivo do usuário
+                const dietType = await this.getDietTypeFromUserGoal(userId);
+
+                // Gerar prompt para detalhamento de alimentos
+                const prompt = this.dietService.generateFoodDetailingPrompt(
+                    meal,
+                    foodPreferences,
+                    mealPosition,
+                    totalMeals,
+                    dietType,
+                    biometrics
+                );
+
+                // Atualizar progresso
+                await this.dietService.updateDietJob(job.id, { progress: 50 });
+
+                // Chamar serviço de IA
+                const aiService = this.aiServiceFactory.getServiceWithFallback();
+                const response = await aiService.generateJsonCompletion(prompt);
+
+                // Validar resposta
+                if (!response || !response.content) {
+                    throw new Error('Falha ao gerar detalhes da refeição');
+                }
+
+                // Atualizar progresso
+                await this.dietService.updateDietJob(job.id, { progress: 70 });
+
+                // Salvar os detalhes dos alimentos
+                await this.dietService.saveMealDetails(meal.id, response.content as MealDetailsDto);
+
+                // Obter a refeição atualizada com os alimentos detalhados
+                const updatedMeal = await this.dietService.getMeal(meal.id);
+
+                // Verificar se todas as refeições do plano já foram detalhadas
+                const allMealsDetailed = await this.areAllMealsDetailed(plan.id);
+
+                // Se todas as refeições estiverem detalhadas, atualizar o status
+                if (allMealsDetailed) {
+                    await this.dietService.updateDietCalculation(plan.calculationId, {
+                        statusPhase: DietProcessPhase.FOOD_DETAILING
+                    });
+                }
+
+                // Atualizar status do job para completado
+                await this.dietService.updateDietJob(job.id, {
+                    status: DietJobStatusEnum.COMPLETED,
+                    progress: 100,
+                    resultData: {
+                        mealId: meal.id,
+                        planId: plan.id,
+                        calculationId: plan.calculationId,
+                        allMealsDetailed: allMealsDetailed
+                    }
+                });
+
+                // Preparar resposta
+                return {
+                    success: true,
+                    message: 'Detalhamento de alimentos concluído com sucesso',
+                    jobId: job.id,
+                    mealId: meal.id,
+                    planId: plan.id,
+                    allMealsDetailed: allMealsDetailed,
+                    meal: {
+                        name: updatedMeal.name,
+                        macronutrients: {
+                            protein: updatedMeal.protein,
+                            carbs: updatedMeal.carbs,
+                            fat: updatedMeal.fat,
+                            calories: updatedMeal.calories
+                        },
+                        foods: updatedMeal.foods?.map(food => ({
+                            name: food.name,
+                            grams: food.grams,
+                            macronutrients: {
+                                protein: food.protein,
+                                carbs: food.carbs,
+                                fat: food.fat,
+                                calories: food.calories
+                            }
+                        })),
+                        howTo: updatedMeal.howTo,
+                        alternatives: updatedMeal.alternatives?.map(alt => ({
+                            name: alt.name,
+                            macronutrients: {
+                                protein: alt.protein,
+                                carbs: alt.carbs,
+                                fat: alt.fat,
+                                calories: alt.calories
+                            },
+                            foods: alt.foods?.map(food => ({
+                                name: food.name,
+                                grams: food.grams,
+                                macronutrients: {
+                                    protein: food.protein,
+                                    carbs: food.carbs,
+                                    fat: food.fat,
+                                    calories: food.calories
+                                }
+                            }))
+                        }))
+                    }
+                };
+            } catch (error) {
+                // Em caso de erro, atualizar o status do job
+                this.logger.error(`Erro no processamento do detalhamento de alimentos: ${error.message}`, error.stack);
+                await this.dietService.updateDietJob(job.id, {
+                    status: DietJobStatusEnum.FAILED,
+                    errorLogs: error.message || 'Erro desconhecido durante o detalhamento de alimentos',
+                    progress: 0
+                });
+
+                throw error;
+            }
         } catch (error) {
             this.logger.error(`Erro no detalhamento de alimentos: ${error.message}`, error.stack);
             throw error;

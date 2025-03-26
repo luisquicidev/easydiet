@@ -143,9 +143,11 @@ export class DietService {
 
     /**
      * Processa a Fase 1 do cálculo de dieta (cálculo metabólico)
+     * Versão atualizada para processamento síncrono
      */
-    async processMetabolicCalculationJob(jobId: string): Promise<void> {
+    async processMetabolicCalculationJob(jobId: string): Promise<DietCalculation> {
         const job = await this.getDietJob(jobId);
+        this.logger.log(`Processando cálculo metabólico para job ${jobId}, usuário ${job.userId}`);
 
         try {
             // Atualizar status para processando
@@ -156,7 +158,7 @@ export class DietService {
 
             // Validar dados de entrada
             if (!job.inputData || !job.inputData.biometrics) {
-                throw new BadRequestException('Biometric data is required for metabolic calculation');
+                throw new BadRequestException('Dados biométricos são obrigatórios para o cálculo metabólico');
             }
 
             // Obter os dados necessários para o cálculo
@@ -188,7 +190,7 @@ export class DietService {
             await this.updateDietJob(jobId, { progress: 60 });
             const result = this.validateAndTransformAIResponse(response.content);
 
-            // Salvar os resultados no banco de dados usando transaction
+            // Salvar os resultados no banco de dados
             await this.updateDietJob(jobId, { progress: 80 });
             const calculation = await this.saveDietCalculation(job.userId, job.id, result);
 
@@ -208,32 +210,17 @@ export class DietService {
                 }
             });
 
-            const userId = job.userId;
+            this.logger.log(`Cálculo metabólico concluído com sucesso para job ${jobId}`);
+            return calculation;
 
-            let mealsPerDay = 4; // Valor padrão
-            try {
-                const nutritionGoal = await this.nutritionService.getUserNutritionGoal(userId);
-                mealsPerDay = nutritionGoal?.mealsPerDay || 4;
-            } catch (goalError) {
-                this.logger.warn(`Could not retrieve nutrition goal for user ${userId}: ${goalError.message}`);
-            }
-
-            // Após salvar os cálculos e planos, iniciar planejamento de refeições
-            if (calculation.id) {
-                await this.dietProcessorService.queueMealPlanning(
-                    userId,
-                    job.id,
-                    calculation.id,
-                    mealsPerDay
-                );
-            }
         } catch (error) {
-            this.logger.error(`Error processing metabolic calculation job: ${error.message}`, error.stack);
+            this.logger.error(`Erro no processamento do cálculo metabólico: ${error.message}`, error.stack);
 
             // Em caso de erro, atualizar o status e registrar o erro
             await this.updateDietJob(jobId, {
                 status: DietJobStatusEnum.FAILED,
-                errorLogs: error.message || 'Unknown error occurred during metabolic calculation'
+                errorLogs: error.message || 'Erro desconhecido durante o cálculo metabólico',
+                progress: 0
             });
 
             throw error;
