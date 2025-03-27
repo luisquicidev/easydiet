@@ -2,18 +2,12 @@
 import { Controller, Post, Get, Param, Body, UseGuards, Request, NotFoundException, BadRequestException, Logger, Query } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { DietService } from '../../nutrition/services/diet.service';
-import { DietProcessorService, DietProcessPhase } from '../services/diet-processor.service';
 import { NutritionService } from '../../nutrition/services/nutrition.service';
 import { AIServiceFactory } from '../../../shared/factories/ai-service.factory';
 import {
-    CreateDietProcessDto,
-    DietProcessStatusDto,
     DietPlanResponseDto,
     DietPlanWithMealsResponseDto, MealDetailsDto
 } from '../../nutrition/dto';
-import { DietJobStatusEnum } from '../../nutrition/entities/diet-generation-job.entity';
-import {UserActivity} from "../../nutrition/entities";
-import {DietPlanGenerationDto} from "../../nutrition/dto/diet-macronutrients.dto";
 
 @Controller('diet')
 @UseGuards(JwtAuthGuard)
@@ -22,7 +16,6 @@ export class DietController {
 
     constructor(
         private readonly dietService: DietService,
-        private readonly dietProcessorService: DietProcessorService,
         private readonly nutritionService: NutritionService,
         private aiServiceFactory: AIServiceFactory,
     ) {}
@@ -43,7 +36,6 @@ export class DietController {
             message: 'Cálculo metabólico concluído com sucesso',
             jobId: calculation.jobId,
             calculationId: calculation.id,
-            phase: DietProcessPhase.CALCULATION,
             plans: calculation.plans.map(plan => ({
                 id: plan.id,
                 name: plan.name,

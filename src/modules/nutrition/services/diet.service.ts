@@ -129,16 +129,6 @@ export class DietService {
         return plan;
     }
 
-    async getUserDietJobs(userId: number): Promise<DietGenerationJob[]> {
-        return this.dietJobRepository.find({
-            where: {userId},
-            order: {createdAt: 'DESC'},
-            relations: ['dietPlans']
-        });
-    }
-
-    // Novos métodos para o sistema de três fases
-
     /**
      * Processa a Fase 1 do cálculo de dieta (cálculo metabólico)
      * Versão atualizada para processamento síncrono
@@ -703,61 +693,6 @@ export class DietService {
     async updateDietCalculation(calculationId: string, updateData: Partial<DietCalculation>): Promise<DietCalculation> {
         await this.dietCalculationRepository.update(calculationId, updateData);
         return this.getDietCalculation(calculationId);
-    }
-
-    /**
-     * Obtém todos os cálculos de dieta de um usuário
-     */
-    async getUserDietCalculations(userId: number): Promise<DietCalculation[]> {
-        return this.dietCalculationRepository.find({
-            where: {userId},
-            order: {createdAt: 'DESC'}
-        });
-    }
-
-    /**
-     * Processa o trabalho de planejamento de refeições (Fase 2)
-     */
-    async processMealPlanningOld(
-        jobId: string,
-        calculationId: string,
-        mealsPerDay: number
-    ): Promise<void> {
-        try {
-            // Obter o cálculo existente
-            const calculation = await this.getDietCalculation(calculationId);
-
-            // Preparar planos para o prompt
-            const planPromptData = calculation.plans.map(plan => ({
-                name: plan.name,
-                totalCalories: plan.totalCalories,
-                application: plan.application,
-                macronutrients: {
-                    protein: plan.protein,
-                    carbs: plan.carbs,
-                    fat: plan.fat
-                }
-            }));
-
-            // Gerar prompt
-            const prompt = this.generateMealPlanningPrompt(planPromptData, mealsPerDay);
-
-            // Chamar serviço de IA
-            const aiService = this.aiServiceFactory.getServiceWithFallback();
-            const response = await aiService.generateJsonCompletion<DietPlanGenerationDto>(prompt);
-
-            // Processar e salvar resposta
-            await this.saveMealPlans(
-                jobId,     // Adicionando jobId
-                calculationId,  // Adicionando calculationId
-                response.content  // Dados da resposta da IA
-            );
-
-        } catch (error) {
-            // Tratamento de erro
-            this.logger.error(`Erro no planejamento de refeições: ${error.message}`);
-            throw error;
-        }
     }
 
     async processMealPlanning (userId): Promise<DietPlan[]> {
