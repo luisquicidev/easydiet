@@ -128,6 +128,60 @@ export class DietController {
     }
 
     /**
+     * Endpoint para detalhamento de alimentos (Fase 3)
+     * Define os alimentos específicos para uma refeição
+     * Versão atualizada para processamento síncrono
+     */
+    @Post('generate-alternative')
+    async detailFoods(
+        @Body() body: { mealId: string },
+        @Request() req
+    ) {
+        const userId = req.user.userId;
+        this.logger.log(`Iniciando detalhamento de alimentos para usuário ${userId}, refeição ${body.mealId}`);
+
+        try {
+            const meal = await this.dietService.getMeal(body.mealId);
+            const plan = await this.dietService.getDietPlan(meal.planId);
+
+            const foodPreferences = await this.nutritionService.getUserFoodPreferences(userId);
+            const biometrics = await this.nutritionService.getUserBiometrics(userId);
+            const mealPosition = meal.sortOrder;
+            const totalMeals = plan.meals?.length || 1;
+
+            const dietType = await this.getDietTypeFromUserGoal(userId);
+
+            const prompt = this.dietService.generateFoodDetailingPrompt(
+                meal,
+                foodPreferences,
+                mealPosition,
+                totalMeals,
+                dietType,
+                biometrics
+            );
+
+            const aiService = this.aiServiceFactory.getServiceWithFallback();
+            const response = await aiService.generateJsonCompletion<MealDetailsDto>(prompt);
+
+            await this.dietService.saveMealDetails(meal.id, response.content as MealDetailsDto);
+
+            const updatedMeal = await this.dietService.getMeal(meal.id);
+
+            return {
+                success: true,
+                message: 'Detalhamento de alimentos concluído com sucesso',
+                mealId: meal.id,
+                planId: plan.id,
+                meal: updatedMeal
+            };
+
+        } catch (error) {
+            this.logger.error(`Erro no detalhamento de alimentos: ${error.message}`, error.stack);
+            throw error;
+        }
+    }
+
+    /**
      * Determina o tipo de dieta com base no objetivo do usuário
      */
     private async getDietTypeFromUserGoal(userId: number): Promise<string> {
