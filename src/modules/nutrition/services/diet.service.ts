@@ -21,7 +21,6 @@ import {
     UserFoodPreference
 } from "../entities";
 import {NutritionService} from "./nutrition.service";
-import {DietProcessorService, DietProcessPhase} from "../../diet/services/diet-processor.service";
 import {DietPlanGenerationDto, DietPlanMacronutrientsDto, MealMacronutrientsDto} from "../dto/diet-macronutrients.dto";
 import {query} from "express";
 
@@ -46,8 +45,6 @@ export class DietService {
         private dietMealRepository: Repository<DietMeal>,
         private dataSource: DataSource,
         private aiServiceFactory: AIServiceFactory,
-        @Inject(forwardRef(() => DietProcessorService))
-        private readonly dietProcessorService: DietProcessorService,
         private readonly nutritionService: NutritionService
     ) {
     }
@@ -761,122 +758,6 @@ Você é um especialista em análise e distribuição alimentar, com foco exclus
         }
 
         return response;
-    }
-
-    /**
-     * Salva os planos de refeições no banco de dados
-     * @param jobId ID do job de geração
-     * @param calculationId ID do cálculo
-     * @param planData Dados dos planos gerados pela IA
-     */
-    async saveMealPlans(
-        jobId: string,
-        calculationId: string,
-        planData: DietPlanGenerationDto
-    ): Promise<void> {
-        this.logger.log(`Iniciando salvamento de planos de refeições para calculationId=${calculationId}, jobId=${jobId}`);
-
-        // Validar dados de entrada
-        if (!planData || !planData.plans || planData.plans.length === 0) {
-            throw new BadRequestException('Dados de planos inválidos ou vazios');
-        }
-
-        const queryRunner = this.dataSource.createQueryRunner();
-        await queryRunner.connect();
-        await queryRunner.startTransaction();
-
-        try {
-            // Obter o cálculo existente com seus planos
-            const calculation = await this.getDietCalculation(calculationId);
-            this.logger.debug(`Encontrado cálculo com ${calculation.plans?.length || 0} planos existentes`);
-
-            // Contador de planos e refeições processados
-            let plansUpdated = 0;
-            let mealsCreated = 0;
-
-            // Processar cada plano dos dados recebidos
-            for (const planInput of planData.plans) {
-                // Encontrar o plano correspondente pelo nome
-                const existingPlan = calculation.plans.find(p => p.name === planInput.name);
-
-                if (!existingPlan) {
-                    this.logger.warn(`Plano "${planInput.name}" não encontrado no cálculo ${calculationId}. Pulando.`);
-                    continue;
-                }
-
-                // Atualizar macronutrientes do plano
-                existingPlan.protein = planInput.macronutrients.protein;
-                existingPlan.carbs = planInput.macronutrients.carbs;
-                existingPlan.fat = planInput.macronutrients.fat;
-
-                // Salvar plano atualizado
-                await queryRunner.manager.save(existingPlan);
-                plansUpdated++;
-
-                this.logger.debug(`Plano "${existingPlan.name}" (id=${existingPlan.id}) atualizado com macronutrientes`);
-
-                // Criar refeições para este plano
-                if (planInput.meals && planInput.meals.length > 0) {
-                    // Preparar todas as refeições para inserção em lote
-                    const meals = planInput.meals.map((mealData, index) =>
-                        queryRunner.manager.create(DietMeal, {
-                            planId: existingPlan.id,
-                            name: mealData.name,
-                            sortOrder: index + 1,
-                            protein: mealData.macronutrients.protein,
-                            carbs: mealData.macronutrients.carbs,
-                            fat: mealData.macronutrients.fat,
-                            calories: this.calculateMealCalories(mealData.macronutrients)
-                        })
-                    );
-
-                    // Salvar todas as refeições de uma vez
-                    const savedMeals = await queryRunner.manager.save(meals);
-                    mealsCreated += savedMeals.length;
-
-                    this.logger.debug(`Criadas ${savedMeals.length} refeições para o plano "${existingPlan.name}"`);
-                } else {
-                    this.logger.warn(`Plano "${planInput.name}" não contém refeições`);
-                }
-            }
-
-            // Atualizar status do job para concluído
-            await this.updateDietJob(jobId, {
-                status: DietJobStatusEnum.COMPLETED,
-                progress: 100,
-                resultData: {
-                    calculationId,
-                    plansUpdated,
-                    mealsCreated,
-                    totalPlans: planData.plans.length
-                }
-            });
-
-            // Atualizar fase do cálculo
-            await this.updateDietCalculation(calculationId, {
-                statusPhase: DietProcessPhase.MEAL_PLANNING
-            });
-
-            // Confirmar todas as alterações
-            await queryRunner.commitTransaction();
-
-            this.logger.log(`Salvamento de planos concluído com sucesso: ${plansUpdated} planos atualizados, ${mealsCreated} refeições criadas`);
-        } catch (error) {
-            // Reverter todas as alterações em caso de erro
-            await queryRunner.rollbackTransaction();
-            this.logger.error(`Erro ao salvar planos de refeições: ${error.message}`, error.stack);
-
-            // Atualizar job com status de falha
-            await this.updateDietJob(jobId, {
-                status: DietJobStatusEnum.FAILED,
-                errorLogs: `Erro ao salvar planos de refeições: ${error.message}`
-            });
-
-            throw error;
-        } finally {
-            // Liberar recursos
-            await queryRunner.release();
-        }
     }
 
     async savePlanMeals (plan: DietPlanMacronutrientsDto) {
