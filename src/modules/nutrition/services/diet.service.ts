@@ -1,27 +1,29 @@
-import {Injectable, NotFoundException, BadRequestException, Logger, Inject, forwardRef} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { DietGenerationJob, DietJobStatusEnum } from '../entities/diet-generation-job.entity';
-import { DietPlan } from '../entities/diet-plan.entity';
-import { DietCalculation } from '../entities/diet-calculation.entity';
-import { DietCalculationFormula } from '../entities/diet-calculation-formula.entity';
-import { DietCalculationMet } from '../entities/diet-calculation-met.entity';
-import { MetReference } from '../entities/met-reference.entity';
-import { UserActivity } from '../entities/user-activity.entity';
-import { AIServiceFactory } from '../../../shared/factories/ai-service.factory';
-import {CreateDietCalculationDto, MacronutrientsDto, MealDetailsDto} from '../dto';
-import { DietGoalType } from '../entities/user-nutrition-goal.entity';
+import {BadRequestException, forwardRef, Inject, Injectable, Logger, NotFoundException} from '@nestjs/common';
+import {InjectRepository} from '@nestjs/typeorm';
+import {DataSource, Repository} from 'typeorm';
+import {DietGenerationJob, DietJobStatusEnum} from '../entities/diet-generation-job.entity';
+import {DietPlan} from '../entities/diet-plan.entity';
+import {DietCalculation} from '../entities/diet-calculation.entity';
+import {DietCalculationFormula} from '../entities/diet-calculation-formula.entity';
+import {DietCalculationMet} from '../entities/diet-calculation-met.entity';
+import {MetReference} from '../entities/met-reference.entity';
+import {UserActivity} from '../entities/user-activity.entity';
+import {AIServiceFactory} from '../../../shared/factories/ai-service.factory';
+import {CreateDietCalculationDto, DietPlanWithMealsResponseDto, MacronutrientsDto, MealDetailsDto} from '../dto';
+import {DietGoalType} from '../entities/user-nutrition-goal.entity';
 import {
     DietMeal,
     DietMealAlternative,
     DietMealAlternativeFood,
-    DietMealFood, FoodPreferenceType,
+    DietMealFood,
+    FoodPreferenceType,
     UserBiometrics,
     UserFoodPreference
 } from "../entities";
 import {NutritionService} from "./nutrition.service";
 import {DietProcessorService, DietProcessPhase} from "../../diet/services/diet-processor.service";
-import {DietPlanGenerationDto} from "../dto/diet-macronutrients.dto";
+import {DietPlanGenerationDto, DietPlanMacronutrientsDto, MealMacronutrientsDto} from "../dto/diet-macronutrients.dto";
+import {query} from "express";
 
 @Injectable()
 export class DietService {
@@ -30,47 +32,42 @@ export class DietService {
     constructor(
         @InjectRepository(DietGenerationJob)
         private dietJobRepository: Repository<DietGenerationJob>,
-
         @InjectRepository(DietPlan)
         private dietPlanRepository: Repository<DietPlan>,
-
         @InjectRepository(DietCalculation)
         private dietCalculationRepository: Repository<DietCalculation>,
-
         @InjectRepository(DietCalculationFormula)
         private dietCalculationFormulaRepository: Repository<DietCalculationFormula>,
-
         @InjectRepository(DietCalculationMet)
         private dietCalculationMetRepository: Repository<DietCalculationMet>,
-
         @InjectRepository(MetReference)
         private metReferenceRepository: Repository<MetReference>,
-
         @InjectRepository(DietMeal)
         private dietMealRepository: Repository<DietMeal>,
-
         private dataSource: DataSource,
         private aiServiceFactory: AIServiceFactory,
         @Inject(forwardRef(() => DietProcessorService))
         private readonly dietProcessorService: DietProcessorService,
         private readonly nutritionService: NutritionService
-    ) {}
+    ) {
+    }
 
     // Métodos existentes para DietGenerationJob
-    async createDietJob(userId: number, jobType: string, inputData: Record<string, any>): Promise<DietGenerationJob> {
+    async createDietJob(userId: number, jobType: string, inputData: Record<string, any>, resultData: Record<string, any> = {}, status: DietJobStatusEnum = DietJobStatusEnum.PENDING, progress: number = 0): Promise<DietGenerationJob> {
         const job = this.dietJobRepository.create({
             userId,
             jobType,
             inputData,
-            status: DietJobStatusEnum.PENDING,
-            progress: 0
+            resultData,
+            status,
+            progress
         });
         return this.dietJobRepository.save(job);
     }
 
     async getDietJob(jobId: string): Promise<DietGenerationJob> {
         const job = await this.dietJobRepository.findOne({
-            where: { id: jobId },
+            where: {id: jobId},
             relations: ['dietPlans']
         });
 
@@ -113,14 +110,15 @@ export class DietService {
 
     async getUserDietPlans(userId: number): Promise<DietPlan[]> {
         return this.dietPlanRepository.find({
-            where: { userId, isActive: true },
-            order: { createdAt: 'DESC' }
+            where: {userId, isActive: true},
+            order: {createdAt: 'DESC'},
+            relations: ['meals', 'meals.foods']
         });
     }
 
     async getDietPlan(planId: string): Promise<DietPlan> {
         const plan = await this.dietPlanRepository.findOne({
-            where: { id: planId },
+            where: {id: planId},
             relations: ['calculation', 'meals', 'meals.foods', 'meals.alternatives', 'meals.alternatives.foods']
         });
 
@@ -133,8 +131,8 @@ export class DietService {
 
     async getUserDietJobs(userId: number): Promise<DietGenerationJob[]> {
         return this.dietJobRepository.find({
-            where: { userId },
-            order: { createdAt: 'DESC' },
+            where: {userId},
+            order: {createdAt: 'DESC'},
             relations: ['dietPlans']
         });
     }
@@ -162,7 +160,7 @@ export class DietService {
             }
 
             // Obter os dados necessários para o cálculo
-            const { biometrics, goal, activities, dailyActivity } = job.inputData;
+            const {biometrics, goal, activities, dailyActivity} = job.inputData;
 
             // Preparar dados para o prompt
             const person = {
@@ -182,16 +180,16 @@ export class DietService {
             const prompt = this.generateMetabolicCalculationPrompt(person, formattedDailyActivity);
 
             // Chamar API de IA
-            await this.updateDietJob(jobId, { progress: 30 });
+            await this.updateDietJob(jobId, {progress: 30});
             const aiService = this.aiServiceFactory.getServiceWithFallback();
             const response = await aiService.generateJsonCompletion(prompt);
 
             // Processar a resposta
-            await this.updateDietJob(jobId, { progress: 60 });
+            await this.updateDietJob(jobId, {progress: 60});
             const result = this.validateAndTransformAIResponse(response.content);
 
             // Salvar os resultados no banco de dados
-            await this.updateDietJob(jobId, { progress: 80 });
+            await this.updateDietJob(jobId, {progress: 80});
             const calculation = await this.saveDietCalculation(job.userId, job.id, result);
 
             // Atualizar job com os resultados
@@ -225,6 +223,64 @@ export class DietService {
 
             throw error;
         }
+    }
+
+    async processMetabolicCalculation(userId: number): Promise<DietCalculation> {
+        const biometrics = await this.nutritionService.getUserBiometrics(userId);
+        const goals = await this.nutritionService.getUserNutritionGoal(userId);
+        const dailyActivity = await this.nutritionService.getUserActivities(userId);
+
+        const person = {
+            weight: biometrics.weight,
+            height: biometrics.height,
+            age: biometrics.age,
+            gender: biometrics.gender,
+            leanMass: biometrics.leanMass,
+            goal: this.mapGoalTypeToPromptFormat(goals?.goalType || DietGoalType.WEIGHT_LOSS),
+            adjust: goals?.calorieAdjustment || 0
+        };
+
+        const prompt = this.generateMetabolicCalculationPrompt(person, this.formatActivitiesAsString(dailyActivity));
+        console.log(prompt);
+        const aiService = this.aiServiceFactory.getServiceWithFallback();
+        const response = await aiService.generateJsonCompletion(prompt);
+        const result = this.validateAndTransformAIResponse(response.content);
+
+        const job = await this.createDietJob(
+            userId,
+            'metabolic-calculation',
+            {
+                prompt,
+                meta: {
+                    person,
+                    activity: this.formatActivitiesAsString(dailyActivity)
+                }
+            },
+            result,
+            DietJobStatusEnum.COMPLETED,
+            100
+        )
+
+        return await this.saveDietCalculation(userId, job.id, result);
+    }
+
+    /*
+    * Formata as atividade em string
+    * */
+    formatActivitiesAsString(activities) {
+        return activities.reduce((result, activity, index) => {
+            const metCode = activity.metReference.code;
+            const metFactor = activity.metReference.metValue;
+            const description = activity.metReference.description;
+            const frequency = activity.frequencyPerWeek;
+            const duration = activity.durationMinutes;
+
+            // Adiciona uma quebra de linha se não for o primeiro item
+            const separator = index === 0 ? '' : '\n';
+
+            // Formata a atividade como string
+            return result + separator + `MET: ${metCode} - ${description}, fator: ${metFactor}: ${duration} minutos, ${frequency} vezes por semana`;
+        }, '');
     }
 
     /**
@@ -462,7 +518,7 @@ export class DietService {
 
         try {
             // Inativar planos anteriores do usuário
-            await queryRunner.manager.update(DietPlan, { userId, isActive: true }, { isActive: false });
+            await queryRunner.manager.update(DietPlan, {userId, isActive: true}, {isActive: false});
             this.logger.log(`Planos anteriores do usuário ${userId} foram inativados`);
 
             // 1. Criar o registro de cálculo
@@ -630,7 +686,7 @@ export class DietService {
      */
     async getDietCalculation(calculationId: string): Promise<DietCalculation> {
         const calculation = await this.dietCalculationRepository.findOne({
-            where: { id: calculationId },
+            where: {id: calculationId},
             relations: ['formulas', 'mets', 'plans']
         });
 
@@ -654,15 +710,15 @@ export class DietService {
      */
     async getUserDietCalculations(userId: number): Promise<DietCalculation[]> {
         return this.dietCalculationRepository.find({
-            where: { userId },
-            order: { createdAt: 'DESC' }
+            where: {userId},
+            order: {createdAt: 'DESC'}
         });
     }
 
     /**
      * Processa o trabalho de planejamento de refeições (Fase 2)
      */
-    async processMealPlanning(
+    async processMealPlanningOld(
         jobId: string,
         calculationId: string,
         mealsPerDay: number
@@ -704,42 +760,58 @@ export class DietService {
         }
     }
 
+    async processMealPlanning (userId): Promise<DietPlan[]> {
+        const plans = await this.getUserDietPlans(userId);
+        const goals = await this.nutritionService.getUserNutritionGoal(userId);
+
+        const prompt = this.generateMealPlanningPrompt(plans, goals.mealsPerDay);
+        const aiService = this.aiServiceFactory.getServiceWithFallback();
+        const response = await aiService.generateJsonCompletion<DietPlanGenerationDto>(prompt);
+
+        for (const generatedPlan of response.content.plans) {
+            await this.savePlanMeals(generatedPlan);
+        }
+
+        return await this.getUserDietPlans(userId);
+    }
+
     /**
      * Gera o prompt para o planejamento de refeições (Fase 2)
      */
     generateMealPlanningPrompt(plans: any[], mealAmount: number): string {
         let prompt = `
-    # Função e objetivo  
-    Você é um especialista em análise e distribuição alimentar, com foco exclusivo na determinação precisa das necessidades individuais.
-    
-    # Diretrizes 
-    - Definir os planos alimentares bem como as refeições de cada plano
-    - Distribuir os macronutrientes no contexto de cada refeição
-    
-    # Passos
-    - Calcule os macronutrientes a partir da quantidade de calorias especificadas.
-    - Utilize as melhores práticas para definir a melhor estratégia nutricional para o indivíduo.
-    - Quando informado uma quantidade de calorias específicas para situações variadas você deve gerar um plano para cada quantidade de calorias.
-    - Gere exatamente a quantidade de refeições indicadas pelo usuário.
-    - Leve em consideração cada refeição e o objetivo do usuário para definir a quantidade dos macronutrientes.
-    - A soma dos macronutrientes de cada refeição deve ser exatamente os macronutrientes de cada plano.
-    
-    # Inputs
-    - Calorias`;
+# Função e objetivo  
+Você é um especialista em análise e distribuição alimentar, com foco exclusivo na determinação precisa das necessidades individuais.
 
+# Diretrizes 
+- Definir os planos alimentares bem como as refeições de cada plano
+- Distribuir os macronutrientes no contexto de cada refeição
+
+# Passos
+- Calcule os macronutrientes a partir da quantidade de calorias especificadas.
+- Utilize as melhores práticas para definir a melhor estratégia nutricional para o indivíduo.
+- Quando informado uma quantidade de calorias específicas para situações variadas você deve gerar um plano para cada quantidade de calorias.
+- Gere EXATAMENTE ${mealAmount} refeições para cada plano, não mais e não menos.
+- Leve em consideração cada refeição e o objetivo do usuário para definir a quantidade dos macronutrientes.
+- A soma dos macronutrientes de cada refeição deve ser exatamente os macronutrientes de cada plano.
+- Inclua refeições típicas como "Café da manhã", "Almoço", "Jantar" e lanches intermediários conforme necessário.
+- Distribua os macronutrientes de forma equilibrada, considerando as necessidades específicas de cada refeição.
+
+# Inputs
+- Planos`;
         plans.forEach(plan => {
-            prompt += `\n      - ${plan.name}: ${plan.totalCalories}, ${plan.application}`;
+            prompt += `\n      - id: ${plan.id}, name: ${plan.name}, calories: ${plan.totalCalories}, application: ${plan.application}`;
         })
 
-        prompt += `\n- Plano alimentar\n      - ${mealAmount} Refeições diárias
+        prompt += `\n- Quantidade de refeiçoes"\n      - ${mealAmount} Refeições diárias
     
-    # Resposta
-    - O formato deverá ser obrigatoriamente em JSON
-    - Evite caracteres adicionais alheios ao formato json
-    - Sua resposta deve conter APENAS o objeto JSON a seguir, sem texto explicativo antes ou depois
-    - O formato do objeto de saída deve seguir exatamente este modelo:
-    {"plans":[{"name":"string","totalCalories":"number","application":"string","macronutrients":{"protein":"number","fat":"number","carbs":"number"},"meals":[{"name":"string","macronutrients":{"protein":"number","fat":"number","carbs":"number"}}]}]}
-    `;
+# Resposta
+- O formato deverá ser obrigatoriamente em JSON
+- Evite caracteres adicionais alheios ao formato json
+- Sua resposta deve conter APENAS o objeto JSON a seguir, sem texto explicativo antes ou depois
+- O formato do objeto de saída deve seguir exatamente este modelo e deve incluir o array de refeições para cada plano:
+{"plans":[{"id":"number (id do plano informado acima)","name":"string","totalCalories":"number","application":"string","macronutrients":{"protein":"number","fat":"number","carbs":"number"},"meals":[{"name":"string","macronutrients":{"protein":"number","fat":"number","carbs":"number"}}]}]}
+`;
 
         return prompt;
     }
@@ -758,81 +830,147 @@ export class DietService {
 
     /**
      * Salva os planos de refeições no banco de dados
+     * @param jobId ID do job de geração
+     * @param calculationId ID do cálculo
+     * @param planData Dados dos planos gerados pela IA
      */
     async saveMealPlans(
         jobId: string,
         calculationId: string,
         planData: DietPlanGenerationDto
     ): Promise<void> {
+        this.logger.log(`Iniciando salvamento de planos de refeições para calculationId=${calculationId}, jobId=${jobId}`);
+
+        // Validar dados de entrada
+        if (!planData || !planData.plans || planData.plans.length === 0) {
+            throw new BadRequestException('Dados de planos inválidos ou vazios');
+        }
+
         const queryRunner = this.dataSource.createQueryRunner();
         await queryRunner.connect();
         await queryRunner.startTransaction();
 
         try {
-            // Obter o cálculo existente
+            // Obter o cálculo existente com seus planos
             const calculation = await this.getDietCalculation(calculationId);
+            this.logger.debug(`Encontrado cálculo com ${calculation.plans?.length || 0} planos existentes`);
 
+            // Contador de planos e refeições processados
+            let plansUpdated = 0;
+            let mealsCreated = 0;
+
+            // Processar cada plano dos dados recebidos
             for (const planInput of planData.plans) {
-                // Encontrar o plano correspondente
+                // Encontrar o plano correspondente pelo nome
                 const existingPlan = calculation.plans.find(p => p.name === planInput.name);
 
-                if (existingPlan) {
-                    // Atualizar plano com macronutrientes
-                    existingPlan.protein = planInput.macronutrients.protein;
-                    existingPlan.carbs = planInput.macronutrients.carbs;
-                    existingPlan.fat = planInput.macronutrients.fat;
+                if (!existingPlan) {
+                    this.logger.warn(`Plano "${planInput.name}" não encontrado no cálculo ${calculationId}. Pulando.`);
+                    continue;
+                }
 
-                    await queryRunner.manager.save(existingPlan);
+                // Atualizar macronutrientes do plano
+                existingPlan.protein = planInput.macronutrients.protein;
+                existingPlan.carbs = planInput.macronutrients.carbs;
+                existingPlan.fat = planInput.macronutrients.fat;
 
-                    // Criar refeições para este plano
-                    if (planInput.meals) {
-                        for (let i = 0; i < planInput.meals.length; i++) {
-                            const mealData = planInput.meals[i];
+                // Salvar plano atualizado
+                await queryRunner.manager.save(existingPlan);
+                plansUpdated++;
 
-                            const meal = queryRunner.manager.create(DietMeal, {
-                                planId: existingPlan.id,
-                                name: mealData.name,
-                                sortOrder: i + 1,
-                                protein: mealData.macronutrients.protein,
-                                carbs: mealData.macronutrients.carbs,
-                                fat: mealData.macronutrients.fat,
-                                calories: this.calculateMealCalories(mealData.macronutrients)
-                            });
+                this.logger.debug(`Plano "${existingPlan.name}" (id=${existingPlan.id}) atualizado com macronutrientes`);
 
-                            await queryRunner.manager.save(meal);
-                        }
-                    }
+                // Criar refeições para este plano
+                if (planInput.meals && planInput.meals.length > 0) {
+                    // Preparar todas as refeições para inserção em lote
+                    const meals = planInput.meals.map((mealData, index) =>
+                        queryRunner.manager.create(DietMeal, {
+                            planId: existingPlan.id,
+                            name: mealData.name,
+                            sortOrder: index + 1,
+                            protein: mealData.macronutrients.protein,
+                            carbs: mealData.macronutrients.carbs,
+                            fat: mealData.macronutrients.fat,
+                            calories: this.calculateMealCalories(mealData.macronutrients)
+                        })
+                    );
+
+                    // Salvar todas as refeições de uma vez
+                    const savedMeals = await queryRunner.manager.save(meals);
+                    mealsCreated += savedMeals.length;
+
+                    this.logger.debug(`Criadas ${savedMeals.length} refeições para o plano "${existingPlan.name}"`);
+                } else {
+                    this.logger.warn(`Plano "${planInput.name}" não contém refeições`);
                 }
             }
 
-            // Atualizar status do job e cálculo
+            // Atualizar status do job para concluído
             await this.updateDietJob(jobId, {
                 status: DietJobStatusEnum.COMPLETED,
                 progress: 100,
                 resultData: {
                     calculationId,
-                    plansGenerated: planData.plans.length
+                    plansUpdated,
+                    mealsCreated,
+                    totalPlans: planData.plans.length
                 }
             });
 
+            // Atualizar fase do cálculo
             await this.updateDietCalculation(calculationId, {
                 statusPhase: DietProcessPhase.MEAL_PLANNING
             });
 
+            // Confirmar todas as alterações
             await queryRunner.commitTransaction();
+
+            this.logger.log(`Salvamento de planos concluído com sucesso: ${plansUpdated} planos atualizados, ${mealsCreated} refeições criadas`);
         } catch (error) {
+            // Reverter todas as alterações em caso de erro
             await queryRunner.rollbackTransaction();
             this.logger.error(`Erro ao salvar planos de refeições: ${error.message}`, error.stack);
 
             // Atualizar job com status de falha
             await this.updateDietJob(jobId, {
                 status: DietJobStatusEnum.FAILED,
-                errorLogs: error.message
+                errorLogs: `Erro ao salvar planos de refeições: ${error.message}`
             });
 
             throw error;
         } finally {
+            // Liberar recursos
             await queryRunner.release();
+        }
+    }
+
+    async savePlanMeals (plan: DietPlanMacronutrientsDto) {
+        const queryRunner = this.dataSource.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
+
+        if(!plan.meals || plan.meals.length === 0)
+            return false; //TODO throw error
+
+        try {
+            const savedPlan = this.getDietPlan(plan.id);
+
+            for (const [index, meal ] of plan.meals.entries()) {
+                await queryRunner.manager.save(queryRunner.manager.create(DietMeal, {
+                    planId: plan.id,
+                    name: meal.name,
+                    sortOrder: index + 1,
+                    protein: meal.macronutrients.protein,
+                    carbs: meal.macronutrients.carbs,
+                    fat: meal.macronutrients.fat,
+                    calories: this.calculateMealCalories(meal.macronutrients)
+                }));
+            }
+
+            await queryRunner.commitTransaction();
+        } catch (e) {
+            await queryRunner.rollbackTransaction();
+            this.logger.error(`Erro ao salvar planos de refeições: ${e.message}`, e.stack);
         }
     }
 
@@ -857,16 +995,17 @@ export class DietService {
         try {
             // Atualizar macronutrientes da refeição
             await queryRunner.manager.update(DietMeal, mealId, {
-                protein: mealDetails.macronutrients.protein,
+                /*protein: mealDetails.macronutrients.protein,
                 carbs: mealDetails.macronutrients.carbs,
-                fat: mealDetails.macronutrients.fat,
-                howTo: mealDetails.howTo
+                fat: mealDetails.macronutrients.fat,*/
+                howTo: mealDetails.howTo,
+                servingSuggestion: mealDetails.servingSuggestion
             });
 
-            // Salvar alimentos da refeição
-            const mealFoods = mealDetails.foods.map((food, index) =>
-                queryRunner.manager.create(DietMealFood, {
-                    mealId,
+            for (let index = 0; index < mealDetails.foods.length; index++) {
+                const food = mealDetails.foods[index];
+                const mealFood = queryRunner.manager.create(DietMealFood, {
+                    mealId: mealId,
                     name: food.name,
                     grams: food.grams,
                     protein: food.macronutrients.protein,
@@ -874,9 +1013,10 @@ export class DietService {
                     fat: food.macronutrients.fat,
                     calories: this.calculateFoodCalories(food.macronutrients),
                     sortOrder: index + 1
-                })
-            );
-            await queryRunner.manager.save(mealFoods);
+                });
+
+                await queryRunner.manager.save(DietMealFood, mealFood);
+            }
 
             // Salvar alternativas, se existirem
             if (mealDetails.alternatives && mealDetails.alternatives.length > 0) {
@@ -906,11 +1046,11 @@ export class DietService {
                         })
                     );
 
-                    return { alternative, foods: alternativeFoods };
+                    return {alternative, foods: alternativeFoods};
                 });
 
                 // Salvar alternativas e seus alimentos
-                for (const { alternative, foods } of mealAlternatives) {
+                for (const {alternative, foods} of mealAlternatives) {
                     const savedAlternative = await queryRunner.manager.save(alternative);
                     await queryRunner.manager.save(foods.map(food => ({
                         ...food,
@@ -943,7 +1083,7 @@ export class DietService {
 
     /**
      * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
-     * sem incluir a geração de alternativas
+     * incluindo contexto cultural brasileiro e orientações específicas por tipo de refeição
      */
     generateFoodDetailingPrompt(
         meal: DietMeal,
@@ -956,7 +1096,16 @@ export class DietService {
         // Extrair preferências e restrições alimentares
         const preferences = userPreferences
             .filter(p => p.type === FoodPreferenceType.PREFERENCE)
-            .map(p => p.description);
+            .map(p => ({
+                id: p.id,
+                name: p.description,
+                macrosPer100g: {
+                    protein: p.proteins || 0,
+                    carbs: p.carbohydrates || 0,
+                    fat: p.fats || 0,
+                    calories: p.calories || 0
+                }
+            }));
 
         const restrictions = userPreferences
             .filter(p => p.type === FoodPreferenceType.RESTRICTION)
@@ -988,21 +1137,35 @@ export class DietService {
 
         // Texto condicional sobre preferências
         const preferencesGuidance = preferences.length > 0
-            ? `- PRIORIZE EXCLUSIVAMENTE os alimentos listados nas preferências do usuário\n- Utilize apenas outros alimentos se as preferências não forem suficientes para compor a refeição completa`
+            ? `- PRIORIZE PRIORITARIAMENTE os alimentos listados nas preferências do usuário\n- Você PODE adicionar até 3 alimentos complementares se necessário para compor uma refeição equilibrada e culturalmente apropriada`
             : `- Utilize os alimentos sugeridos como base, mas sinta-se livre para incluir outras opções saudáveis`;
+
+        // Contexto cultural específico para o tipo de refeição
+        const culturalContext = this.getMealCulturalContext(mealType);
+
+        // Estrutura de refeição recomendada
+        const mealStructure = this.getMealStructure(mealType);
 
         return `
 # Função e objetivo
-Você é um nutricionista especializado em detalhamento de refeições personalizadas, com foco em distribuição ideal de macro e micronutrientes.
+Você é um nutricionista especializado em detalhamento de refeições personalizadas brasileiras, com foco em distribuição ideal de macro e micronutrientes.
+
+# Contexto Cultural - ${mealType}
+${culturalContext}
+
+# Estrutura Recomendada para ${mealType}
+${mealStructure}
 
 # Diretrizes
 - Detalhar com precisão os alimentos e quantidades para uma refeição específica
 - Distribuir os macronutrientes definidos de forma equilibrada entre alimentos reais
 - Priorizar alimentos integrais, frescos e minimamente processados
+- Combinar os alimentos de forma CULTURALMENTE APROPRIADA para ${mealType}
 ${preferencesGuidance}
 - Respeitar RIGOROSAMENTE as restrições alimentares e alergias
 - Para cada alimento, especificar a quantidade em gramas e seus valores nutricionais
 - Balancear os micronutrientes relevantes para esta refeição
+- Não troque de forma nenhuma o nome da refeição que está informado abaixo
 ${dietGuidelines}
 
 # Informações da refeição
@@ -1019,8 +1182,10 @@ ${biometrics ? `- Idade: ${biometrics.age} anos
 - Altura: ${biometrics.height}cm
 - Sexo: ${biometrics.gender}` : '- Informações biométricas não disponíveis'}
 
-# Preferências alimentares (USE EXCLUSIVAMENTE ESTES ALIMENTOS, SE POSSÍVEL)
-${preferences.length > 0 ? preferences.map(p => `- ${p}`).join('\n') : '- Não especificadas'}
+# Preferências alimentares (USE PRIORITARIAMENTE ESTES ALIMENTOS)
+${preferences.length > 0
+            ? JSON.stringify(preferences, null, 2)
+            : '- Não especificadas'}
 
 # Restrições alimentares (NUNCA INCLUA ESTES ALIMENTOS)
 ${restrictions.length > 0 ? restrictions.map(r => `- ${r}`).join('\n') : '- Não especificadas'}
@@ -1028,7 +1193,7 @@ ${restrictions.length > 0 ? restrictions.map(r => `- ${r}`).join('\n') : '- Não
 # Alergias (NUNCA INCLUA ESTES ALIMENTOS)
 ${allergies.length > 0 ? allergies.map(a => `- ${a}`).join('\n') : '- Não especificadas'}
 
-${preferences.length === 0 ? `# Alimentos sugeridos (use apenas se necessário)
+${preferences.length === 0 ? `# Alimentos sugeridos (use se necessário)
 ${suggestedFoods.map(f => `- ${f}`).join('\n')}` : ''}
 
 # Micronutrientes importantes para esta refeição
@@ -1036,10 +1201,13 @@ ${micronutrientGuidelines}
 
 # Instruções
 1. Forneça uma lista detalhada de 4-6 alimentos para esta refeição, com quantidades em gramas
-2. IMPORTANTE: Use EXCLUSIVAMENTE alimentos listados nas preferências do usuário, a menos que não sejam suficientes
-3. Para cada alimento, especifique os macronutrientes (proteínas, carboidratos, gorduras)
-4. Inclua uma breve instrução de preparação da refeição em formato "passo a passo"
-5. Garanta que o total de macronutrientes respeite exatamente os valores definidos
+2. IMPORTANTE: Use PRIORITARIAMENTE alimentos listados nas preferências do usuário
+3. Se necessário para criar uma refeição equilibrada e culturalmente apropriada, adicione até 3 alimentos complementares
+4. Para cada alimento, especifique os macronutrientes (proteínas, carboidratos, gorduras)
+5. Combine os alimentos de forma lógica e culturalmente adequada para ${mealType}
+6. Inclua uma breve instrução de preparação da refeição em formato "passo a passo"
+7. Garanta que o total de macronutrientes respeite exatamente os valores definidos
+8. Sugira uma forma de servir os alimentos que seja culturalmente apropriada para ${mealType}
 
 # Resposta
 Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou texto adicional:
@@ -1053,6 +1221,7 @@ Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou text
   },
   "foods": [
     {
+      "id": "id do alimento ou \"adicional\" para novos alimentos",
       "name": "Nome do alimento",
       "grams": 0,
       "macronutrients": {
@@ -1062,107 +1231,168 @@ Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou text
       }
     }
   ],
-  "howTo": "Instruções de preparação"
+  "howTo": "Instruções de preparação",
+  "servingSuggestion": "Sugestão de como servir os alimentos"
 }
 `;
     }
 
     /**
-     * Determina o tipo de refeição com base na posição e número total de refeições
+     * Retorna o contexto cultural específico para cada tipo de refeição na cultura brasileira
+     */
+    getMealCulturalContext(mealType: string): string {
+        const contexts = {
+            'Café da Manhã': `Na cultura brasileira, o café da manhã é uma refeição que quebra o jejum noturno. Tipicamente inclui pães, bolos simples, frutas, café, leite, queijos e manteiga/margarina. Combinações tradicionais incluem pão com manteiga e café, tapioca com queijo, ou frutas com iogurte e granola.`,
+
+            'Lanche da Manhã': `O lanche da manhã brasileiro é uma refeição leve entre o café da manhã e o almoço. Geralmente consiste em frutas, iogurtes, castanhas ou pequenos sanduíches. O foco está em manter a energia até o almoço sem sobrecarregar a digestão.`,
+
+            'Almoço': `O almoço é a principal refeição do dia na cultura brasileira. Tradicionalmente inclui arroz, feijão, uma proteína animal (carne, frango ou peixe), vegetais e saladas. É uma refeição substancial que fornece energia para o restante do dia.`,
+
+            'Lanche da Tarde': `O lanche da tarde brasileiro, muitas vezes chamado de "café da tarde", é uma pausa entre o almoço e o jantar. Tipicamente inclui pães, bolos caseiros, frutas, café, chás, iogurtes e queijos. Combinações populares incluem pão com recheio proteico, vitaminas de frutas com aveia, ou bolos simples com café.`,
+
+            'Jantar': `O jantar brasileiro é geralmente a segunda refeição principal, mas costuma ser mais leve que o almoço. Pode seguir um padrão similar ao almoço, mas em porções menores, ou incluir sopas e massas. Muitas famílias valorizam o jantar como momento de reunião familiar.`,
+
+            'Ceia': `A ceia é uma pequena refeição opcional antes de dormir. Normalmente consiste em algo leve como leites, chás, biscoitos simples ou frutas leves. O objetivo é satisfazer a fome noturna sem prejudicar o sono ou a digestão.`
+        };
+
+        return contexts[mealType] || 'Refeição tradicional na cultura brasileira.';
+    }
+
+    /**
+     * Retorna a estrutura recomendada para cada tipo de refeição
+     */
+    getMealStructure(mealType: string): string {
+        const structures = {
+            'Café da Manhã': `- Base (1): pão, tapioca, aveia ou cereal integral\n- Proteína (1): queijo, ovos, iogurte ou pasta proteica\n- Fruta (1): banana, maçã, mamão ou outra fruta da estação\n- Bebida (1): café, chá, leite ou suco natural`,
+
+            'Lanche da Manhã': `- Proteína ou Fruta (1-2): fruta fresca, iogurte, castanhas ou queijo\n- Complemento (opcional): pequena porção de carboidrato complexo`,
+
+            'Almoço': `- Carboidrato (1): arroz, batata, mandioca ou massa\n- Leguminosa (1): feijão, lentilha ou grão-de-bico\n- Proteína animal (1): carne, frango, peixe ou ovo\n- Vegetais/Salada (1-2): verduras, legumes variados\n- Complemento (opcional): farofa, vinagrete`,
+
+            'Lanche da Tarde': `- Base (1): pão, bolo simples, tapioca ou aveia\n- Proteína (1): queijo, iogurte, pasta proteica ou oleaginosas\n- Fruta (opcional): banana ou outra fruta da estação\n- Bebida (opcional): café, chá ou suco natural`,
+
+            'Jantar': `- Carboidrato (1): em menor quantidade que no almoço\n- Proteína (1): carne, frango, peixe, ovo ou opção vegetariana\n- Vegetais (1-2): verduras e legumes variados\n- Alternativa: sopa com pão ou sanduíche natural`,
+
+            'Ceia': `- Item leve (1-2): iogurte, fruta leve, chá ou leite vegetal/animal com canela`
+        };
+
+        return structures[mealType] || 'Combine os alimentos de forma equilibrada e culturalmente apropriada.';
+    }
+
+    /**
+     * Determina o tipo de refeição com base na posição e número total de refeições,
+     * seguindo a cultura alimentar brasileira
      */
     private determineMealType(position: number, totalMeals: number): string {
+        // Esquemas comuns de refeições no Brasil
         if (totalMeals <= 3) {
             // Esquema tradicional de 3 refeições
-            if (position === 1) return 'Café da manhã';
+            if (position === 1) return 'Café da Manhã';
             if (position === 2) return 'Almoço';
             if (position === 3) return 'Jantar';
         } else if (totalMeals === 4) {
-            // Esquema com 4 refeições
-            if (position === 1) return 'Café da manhã';
-            if (position === 2) return 'Lanche da manhã';
-            if (position === 3) return 'Almoço';
+            // Esquema com 4 refeições (comum no Brasil)
+            if (position === 1) return 'Café da Manhã';
+            if (position === 2) return 'Almoço';
+            if (position === 3) return 'Café da Tarde'; // Nome mais comum no Brasil para o lanche da tarde
             if (position === 4) return 'Jantar';
         } else if (totalMeals === 5) {
             // Esquema com 5 refeições
-            if (position === 1) return 'Café da manhã';
-            if (position === 2) return 'Lanche da manhã';
+            if (position === 1) return 'Café da Manhã';
+            if (position === 2) return 'Lanche da Manhã';
             if (position === 3) return 'Almoço';
-            if (position === 4) return 'Lanche da tarde';
+            if (position === 4) return 'Café da Tarde'; // Nome mais comum no Brasil
             if (position === 5) return 'Jantar';
         } else {
             // Esquema com 6 ou mais refeições
-            if (position === 1) return 'Café da manhã';
-            if (position === 2) return 'Lanche da manhã';
+            if (position === 1) return 'Café da Manhã';
+            if (position === 2) return 'Lanche da Manhã';
             if (position === 3) return 'Almoço';
-            if (position === 4) return 'Lanche da tarde';
+            if (position === 4) return 'Café da Tarde';
             if (position === 5) return 'Jantar';
             if (position === 6) return 'Ceia';
-            if (position > 6) return `Refeição extra ${position - 6}`;
+            if (position > 6) return `Refeição Extra ${position - 6}`;
         }
 
-        return 'Refeição não categorizada';
+        return 'Refeição';
     }
 
     /**
-     * Retorna alimentos sugeridos para um tipo específico de refeição
+     * Retorna alimentos sugeridos para um tipo específico de refeição, adaptados à culinária brasileira
      */
     private getSuggestedFoodsForMealType(mealType: string, dietType: string): string[] {
-        const commonFoods: Record<string, string[]> = {
+        const brazilianFoods: Record<string, string[]> = {
             'Café da manhã': [
-                'Ovos', 'Aveia', 'Pão integral', 'Iogurte', 'Frutas',
-                'Queijo cottage', 'Mel', 'Café', 'Leite', 'Granola'
+                'Pão francês', 'Pão de queijo', 'Tapioca', 'Cuscuz', 'Queijo minas',
+                'Queijo coalho', 'Manteiga', 'Requeijão', 'Mamão', 'Banana',
+                'Café', 'Leite', 'Iogurte', 'Ovos mexidos', 'Mingau de aveia',
+                'Bolo simples', 'Mel', 'Geleia de frutas', 'Manga', 'Abacate'
             ],
             'Lanche da manhã': [
-                'Frutas', 'Iogurte', 'Castanhas', 'Smoothie', 'Barra de proteína',
-                'Queijo', 'Ovo cozido', 'Amendoim', 'Maçã com pasta de amendoim'
+                'Banana', 'Maçã', 'Pera', 'Castanha-do-Pará', 'Iogurte natural',
+                'Barra de cereais', 'Pão de queijo', 'Mix de castanhas', 'Queijo branco',
+                'Tangerina', 'Abacaxi', 'Uva', 'Caju', 'Goiaba', 'Vitamina de frutas'
             ],
             'Almoço': [
-                'Arroz integral', 'Feijão', 'Frango', 'Peixe', 'Carne bovina',
-                'Salada verde', 'Legumes', 'Batata doce', 'Quinoa', 'Azeite'
+                'Arroz branco', 'Arroz integral', 'Feijão carioca', 'Feijão preto', 'Farofa',
+                'Carne moída', 'Frango grelhado', 'Filé de peixe', 'Picadinho de carne',
+                'Couve refogada', 'Abobrinha', 'Brócolis', 'Salada verde', 'Alface',
+                'Tomate', 'Cenoura ralada', 'Batata', 'Mandioca cozida', 'Polenta',
+                'Carne de panela', 'Ovo frito', 'Abóbora'
             ],
             'Lanche da tarde': [
-                'Frutas', 'Torrada integral', 'Pasta de amendoim', 'Whey protein',
-                'Iogurte', 'Castanhas', 'Tapioca', 'Queijo branco', 'Omelete'
+                'Pão integral', 'Queijo minas', 'Café com leite', 'Bolo caseiro',
+                'Biscoito de polvilho', 'Tapioca', 'Iogurte com granola', 'Banana',
+                'Vitamina de frutas', 'Pão de queijo', 'Abacate com mel',
+                'Suco de laranja', 'Caju', 'Maçã', 'Pera', 'Melancia'
             ],
             'Jantar': [
-                'Frango', 'Peixe', 'Ovo', 'Legumes', 'Salada', 'Batata doce',
-                'Arroz integral', 'Abobrinha', 'Tofu', 'Macarrão integral'
+                'Sopa de legumes', 'Canja de galinha', 'Arroz', 'Feijão',
+                'Frango assado', 'Omelete', 'Legumes refogados', 'Salada',
+                'Purê de batata', 'Escondidinho', 'Sanduíche natural',
+                'Panqueca de carne', 'Quiabo', 'Berinjela', 'Abobrinha'
             ],
             'Ceia': [
-                'Iogurte', 'Chá de camomila', 'Mingau de aveia', 'Caseína',
-                'Queijo cottage', 'Amêndoas', 'Banana', 'Leite morno'
+                'Iogurte natural', 'Maçã', 'Banana', 'Chá de camomila',
+                'Chá de erva-cidreira', 'Leite morno', 'Mingau de aveia',
+                'Biscoito integral', 'Queijo branco', 'Castanhas'
             ]
         };
 
-        // Adicionar ou remover alimentos com base no tipo de dieta
+        // Modificar as listas com base no tipo de dieta
         if (dietType === 'low-carb') {
-            return (commonFoods[mealType] || [])
-                .filter(food => !['Arroz', 'Pão', 'Aveia', 'Granola', 'Batata', 'Macarrão', 'Tapioca'].some(carb => food.includes(carb)))
-                .concat(['Abacate', 'Coco', 'Ovos mexidos', 'Queijos', 'Oleaginosas']);
+            return (brazilianFoods[mealType] || [])
+                .filter(food => !['Arroz', 'Pão', 'Tapioca', 'Cuscuz', 'Batata', 'Mandioca', 'Feijão', 'Bolo', 'Biscoito', 'Polenta'].some(carb => food.includes(carb)))
+                .concat(['Ovos', 'Queijos variados', 'Abacate', 'Coco', 'Castanhas', 'Azeite', 'Carnes', 'Folhas verdes', 'Berinjela', 'Abobrinha']);
         } else if (dietType === 'vegetarian') {
-            return (commonFoods[mealType] || [])
-                .filter(food => !['Frango', 'Peixe', 'Carne'].some(meat => food.includes(meat)))
-                .concat(['Tofu', 'Tempeh', 'Lentilha', 'Grão-de-bico', 'Proteína de ervilha']);
+            return (brazilianFoods[mealType] || [])
+                .filter(food => !['Frango', 'Peixe', 'Carne', 'Canja', 'Picadinho'].some(meat => food.includes(meat)))
+                .concat(['Tofu', 'Cogumelos', 'Lentilha', 'Grão-de-bico', 'Soja', 'Ovos', 'Queijo']);
         } else if (dietType === 'vegan') {
-            return (commonFoods[mealType] || [])
-                .filter(food => !['Frango', 'Peixe', 'Carne', 'Ovos', 'Leite', 'Queijo', 'Iogurte', 'Whey', 'Caseína'].some(animal => food.includes(animal)))
-                .concat(['Tofu', 'Tempeh', 'Lentilha', 'Grão-de-bico', 'Proteína de ervilha', 'Leite vegetal', 'Iogurte de coco']);
+            return (brazilianFoods[mealType] || [])
+                .filter(food => !['Frango', 'Peixe', 'Carne', 'Ovos', 'Leite', 'Queijo', 'Iogurte', 'Requeijão', 'Manteiga'].some(animal => food.includes(animal)))
+                .concat(['Tofu', 'Leite de coco', 'Leite de castanha', 'Pasta de amendoim', 'Cogumelos', 'Lentilha', 'Grão-de-bico', 'Abacate', 'Quinoa', 'Açaí']);
         }
 
-        return commonFoods[mealType] || ['Alimentos variados e equilibrados'];
+        return brazilianFoods[mealType] || ['Alimentos variados e equilibrados típicos da culinária brasileira'];
     }
 
     /**
-     * Retorna diretrizes específicas para um tipo de dieta
+     * Retorna diretrizes específicas para um tipo de dieta, adaptadas à culinária brasileira
      */
     private getDietTypeGuidelines(dietType: string): string {
         const guidelines: Record<string, string> = {
-            'balanced': '- Mantenha um equilíbrio entre proteínas, carboidratos e gorduras\n- Priorize carboidratos complexos e de baixo índice glicêmico\n- Inclua proteínas magras e gorduras saudáveis',
-            'low-carb': '- Mantenha os carboidratos abaixo de 25% do total calórico\n- Priorize gorduras saudáveis como fonte energética\n- Evite grãos, açúcares e amidos\n- Aumente a ingestão de vegetais não-amiláceos',
-            'high-protein': '- Garanta que cada refeição tenha pelo menos 25-30g de proteína\n- Distribua proteínas uniformemente ao longo do dia\n- Priorize proteínas de alto valor biológico\n- Limite gorduras saturadas',
-            'vegetarian': '- Combine diferentes fontes vegetais de proteína para perfil completo de aminoácidos\n- Inclua fontes de ferro não-heme, zinco e vitamina B12\n- Utilize ovos e laticínios para complementar aminoácidos essenciais',
-            'vegan': '- Combine diferentes fontes vegetais de proteína em cada refeição\n- Inclua alimentos fortificados com B12 ou considere suplementação\n- Priorize fontes de ômega-3 vegetal como linhaça e chia\n- Inclua alimentos ricos em ferro, zinco e cálcio',
-            'mediterranean': '- Priorize azeite de oliva extra-virgem como fonte principal de gordura\n- Inclua peixes e frutos do mar regularmente\n- Utilize ervas e especiarias em vez de sal\n- Base as refeições em vegetais, legumes e grãos integrais'
+            'balanced': '- Mantenha o tradicional prato brasileiro: ½ de vegetais, ¼ de proteínas e ¼ de carboidratos\n- Preserve o clássico "arroz com feijão" por seu equilíbrio de aminoácidos\n- Inclua frutas tropicais brasileiras ricas em vitaminas e minerais\n- Prefira azeite e óleos vegetais às gorduras saturadas',
+
+            'low-carb': '- Reduza o consumo de arroz, mandioca, batatas e farinhas\n- Substitua o arroz por vegetais ou prepare porções menores\n- Mantenha o feijão em pequenas porções por seu valor proteico\n- Aproveite abacate, coco, castanha-do-pará e outras fontes de gorduras saudáveis\n- Priorize carnes magras, ovos e queijos como fontes de proteína',
+
+            'high-protein': '- Inclua proteínas de alta qualidade em todas as refeições (carnes, ovos, laticínios)\n- Valorize o feijão, uma proteína tradicional brasileira rica em fibras\n- Complemente com whey protein ou outras fontes de proteína de absorção rápida\n- Distribua proteínas uniformemente ao longo do dia\n- Associe proteínas a vegetais brasileiros para melhor digestão',
+
+            'vegetarian': '- Combine "arroz com feijão" como base proteica vegetal completa\n- Explore diversidade de grãos brasileiros: milho, quinoa, amaranto\n- Utilize queijos brasileiros (queijo minas, coalho, ricota) como fonte de proteína\n- Aproveite castanhas brasileiras (castanha-do-pará, caju) para ômega-3 e minerais\n- Inclua ovos em diferentes preparações para completar aminoácidos',
+
+            'vegan': '- Base a alimentação no clássico "arroz com feijão" para perfil completo de aminoácidos\n- Explore leguminosas brasileiras: feijão de todos os tipos, grão-de-bico, lentilha\n- Utilize leites vegetais (castanha, arroz, soja) fortificados com cálcio e B12\n- Aproveite frutas brasileiras ricas em nutrientes (açaí, caju, goiaba)\n- Inclua tofu, tempeh ou proteína de ervilha para refeições mais proteicas',
+
+            'mediterranean': '- Adapte a dieta mediterrânea aos ingredientes brasileiros\n- Use azeite extra-virgem como principal fonte de gordura\n- Priorize peixes da costa brasileira ricos em ômega-3\n- Valorize ervas aromáticas brasileiras no lugar do sal\n- Inclua frutas tropicais brasileiras, verduras e legumes coloridos diariamente'
         };
 
         return guidelines[dietType] || guidelines['balanced'];
@@ -1189,7 +1419,7 @@ Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou text
      */
     async getMeal(mealId: string): Promise<DietMeal> {
         const meal = await this.dietMealRepository.findOne({
-            where: { id: mealId },
+            where: {id: mealId},
             relations: ['foods', 'alternatives', 'alternatives.foods']
         });
 

@@ -48,6 +48,9 @@ export class DietMeal {
     @Column({ type: 'text', nullable: true })
     howTo: string;
 
+    @Column({ type: 'text', nullable: true })
+    servingSuggestion: string;
+
     @Column({ default: false })
     isCustomized: boolean;
 

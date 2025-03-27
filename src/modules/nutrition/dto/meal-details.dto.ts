@@ -46,6 +46,10 @@ export class MealDetailsDto {
     @Type(() => MealAlternativeDto)
     @IsOptional()
     alternatives?: MealAlternativeDto[];
+
+    @IsString()
+    @IsOptional()
+    servingSuggestion?: string;
 }
 
 export class MealAlternativeDto {

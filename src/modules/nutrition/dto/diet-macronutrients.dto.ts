@@ -27,6 +27,9 @@ export class MealMacronutrientsDto {
 
 export class DietPlanMacronutrientsDto {
     @IsString()
+    id: string;
+
+    @IsString()
     name: string;
 
     @IsNumber()

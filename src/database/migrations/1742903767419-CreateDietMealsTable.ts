@@ -62,6 +62,11 @@ export class CreateDietMealsTable1742903767419 implements MigrationInterface {
                         isNullable: true,
                     },
                     {
+                        name: 'serving_suggestion',
+                        type: 'text',
+                        isNullable: true,
+                    },
+                    {
                         name: 'is_customized',
                         type: 'boolean',
                         default: false,
