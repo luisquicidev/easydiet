@@ -7,7 +7,7 @@ export class DietMealAlternative {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column()
+    @Column({name: 'original_meal_id'})
     originalMealId: string;
 
     @Column()

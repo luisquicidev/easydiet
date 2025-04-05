@@ -43,6 +43,10 @@ export class DietService {
         private metReferenceRepository: Repository<MetReference>,
         @InjectRepository(DietMeal)
         private dietMealRepository: Repository<DietMeal>,
+        @InjectRepository(DietMealAlternative)
+        private dietMealAlternativeRepository: Repository<DietMealAlternative>,
+        @InjectRepository(DietMealAlternativeFood)
+        private dietMealAlternativeFoodRepository: Repository<DietMealAlternativeFood>,
         private dataSource: DataSource,
         private aiServiceFactory: AIServiceFactory,
         private readonly nutritionService: NutritionService
@@ -692,7 +696,7 @@ export class DietService {
         return this.getDietCalculation(calculationId);
     }
 
-    async processMealPlanning (userId): Promise<DietPlan[]> {
+    async processMealPlanning(userId): Promise<DietPlan[]> {
         const plans = await this.getUserDietPlans(userId);
         const goals = await this.nutritionService.getUserNutritionGoal(userId);
 
@@ -760,18 +764,18 @@ Você é um especialista em análise e distribuição alimentar, com foco exclus
         return response;
     }
 
-    async savePlanMeals (plan: DietPlanMacronutrientsDto) {
+    async savePlanMeals(plan: DietPlanMacronutrientsDto) {
         const queryRunner = this.dataSource.createQueryRunner();
         await queryRunner.connect();
         await queryRunner.startTransaction();
 
-        if(!plan.meals || plan.meals.length === 0)
+        if (!plan.meals || plan.meals.length === 0)
             return false; //TODO throw error
 
         try {
             const savedPlan = this.getDietPlan(plan.id);
 
-            for (const [index, meal ] of plan.meals.entries()) {
+            for (const [index, meal] of plan.meals.entries()) {
                 await queryRunner.manager.save(queryRunner.manager.create(DietMeal, {
                     planId: plan.id,
                     name: meal.name,
@@ -900,6 +904,7 @@ Você é um especialista em análise e distribuição alimentar, com foco exclus
     /**
      * Gera o prompt para o detalhamento de alimentos de uma refeição (Fase 3)
      * incluindo contexto cultural brasileiro e orientações específicas por tipo de refeição
+     * Suporta geração de alternativas para refeições existentes
      */
     generateFoodDetailingPrompt(
         meal: DietMeal,
@@ -907,7 +912,13 @@ Você é um especialista em análise e distribuição alimentar, com foco exclus
         mealPosition: number,
         totalMeals: number,
         dietType: string = 'balanced',
-        biometrics?: UserBiometrics
+        biometrics?: UserBiometrics,
+        isAlternative: boolean = false,
+        originalMeal?: {
+            name: string,
+            foods: Array<{ name: string, grams: number }>,
+            howTo?: string
+        }
     ): string {
         // Extrair preferências e restrições alimentares
         const preferences = userPreferences
@@ -951,11 +962,6 @@ Você é um especialista em análise e distribuição alimentar, com foco exclus
         // Obter recomendações de micronutrientes
         const micronutrientGuidelines = this.getMicronutrientGuidelines(mealType);
 
-        // Texto condicional sobre preferências
-        const preferencesGuidance = preferences.length > 0
-            ? `- PRIORIZE PRIORITARIAMENTE os alimentos listados nas preferências do usuário\n- Você PODE adicionar até 3 alimentos complementares se necessário para compor uma refeição equilibrada e culturalmente apropriada`
-            : `- Utilize os alimentos sugeridos como base, mas sinta-se livre para incluir outras opções saudáveis`;
-
         // Contexto cultural específico para o tipo de refeição
         const culturalContext = this.getMealCulturalContext(mealType);
 
@@ -963,8 +969,23 @@ Você é um especialista em análise e distribuição alimentar, com foco exclus
         const mealStructure = this.getMealStructure(mealType);
 
         return `
+${isAlternative ? `
+# Objetivo Especial: Alternativa de Refeição
+Você está criando uma ALTERNATIVA para uma refeição existente. Mantenha EXATAMENTE os mesmos macronutrientes, 
+mas utilize ingredientes diferentes e preparações distintas para oferecer variedade ao usuário.
+` : ''}
+
 # Função e objetivo
 Você é um nutricionista especializado em detalhamento de refeições personalizadas brasileiras, com foco em distribuição ideal de macro e micronutrientes.
+
+${isAlternative && originalMeal ? `
+# Refeição Original (NÃO REPITA ESTES ALIMENTOS)
+Nome: ${originalMeal.name}
+Alimentos:
+${originalMeal.foods.map(food => `- ${food.name} (${food.grams}g)`).join('\n')}
+Modo de preparo: ${originalMeal.howTo || 'Não especificado'}
+
+` : ''}
 
 # Contexto Cultural - ${mealType}
 ${culturalContext}
@@ -976,8 +997,12 @@ ${mealStructure}
 - Detalhar com precisão os alimentos e quantidades para uma refeição específica
 - Distribuir os macronutrientes definidos de forma equilibrada entre alimentos reais
 - Priorizar alimentos integrais, frescos e minimamente processados
+${isAlternative ? `- UTILIZAR INGREDIENTES DIFERENTES da refeição original, evitando repetir os mesmos alimentos principais
+- Manter a MESMA QUANTIDADE EXATA de proteínas, carboidratos e gorduras da refeição original` : ''}
 - Combinar os alimentos de forma CULTURALMENTE APROPRIADA para ${mealType}
-${preferencesGuidance}
+- UTILIZE EXCLUSIVAMENTE alimentos das preferências do usuário se forem suficientes para atender todos os macronutrientes necessários
+- APENAS SE as preferências não cobrirem todos os macronutrientes necessários, complemente com outros alimentos saudáveis e acessíveis, limitando-se ao mínimo necessário
+${isAlternative ? `- Seja criativo ao escolher ingredientes alternativos que proporcionem uma experiência de refeição diferente da original` : ''}
 - Respeitar RIGOROSAMENTE as restrições alimentares e alergias
 - Para cada alimento, especificar a quantidade em gramas e seus valores nutricionais
 - Balancear os micronutrientes relevantes para esta refeição
@@ -1037,7 +1062,7 @@ Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou text
   },
   "foods": [
     {
-      "id": "id do alimento ou \"adicional\" para novos alimentos",
+      "id": "id do alimento ou \\"adicional\\" para novos alimentos",
       "name": "Nome do alimento",
       "grams": 0,
       "macronutrients": {
@@ -1244,5 +1269,242 @@ Forneça sua resposta APENAS no formato JSON a seguir, sem explicações ou text
         }
 
         return meal;
+    }
+
+    /**
+     * Cria uma alternativa para uma refeição específica
+     * @param mealId ID da refeição original
+     * @param name Nome opcional para a alternativa (senão usa "Alternativa para [refeição]")
+     * @returns A nova alternativa criada
+     */
+    async createMealAlternative(mealId: string, name?: string): Promise<DietMealAlternative> {
+        // Buscar a refeição original com todos os detalhes
+        const originalMeal = await this.getMeal(mealId);
+
+        if (!originalMeal) {
+            throw new NotFoundException(`Refeição com ID "${mealId}" não encontrada`);
+        }
+
+        // Usar o QueryRunner para garantir transações atômicas
+        const queryRunner = this.dataSource.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
+
+        try {
+            // Criar a alternativa com os mesmos macronutrientes
+            const alternativeName = name || `Alternativa para ${originalMeal.name}`;
+            const sortOrder = await this.getNextAlternativeSortOrder(mealId);
+
+            const mealAlternative = queryRunner.manager.create(DietMealAlternative, {
+                originalMealId: mealId,
+                name: alternativeName,
+                protein: originalMeal.protein,
+                carbs: originalMeal.carbs,
+                fat: originalMeal.fat,
+                calories: originalMeal.calories,
+                sortOrder: sortOrder,
+                howTo: '', // Será preenchido depois pelo detalhamento
+            });
+
+            const savedAlternative = await queryRunner.manager.save(mealAlternative);
+            await queryRunner.commitTransaction();
+
+            return savedAlternative;
+        } catch (error) {
+            await queryRunner.rollbackTransaction();
+            this.logger.error(`Erro ao criar alternativa para refeição: ${error.message}`, error.stack);
+            throw error;
+        } finally {
+            await queryRunner.release();
+        }
+    }
+
+    /**
+     * Obtém o próximo número de ordem para uma alternativa
+     * @param mealId ID da refeição original
+     * @returns Próximo número de ordem
+     */
+    private async getNextAlternativeSortOrder(mealId: string): Promise<number> {
+        const alternatives = await this.dietMealAlternativeRepository.find({
+            where: {originalMealId: mealId},
+            order: {sortOrder: 'DESC'},
+            take: 1
+        });
+
+        return alternatives.length > 0 ? alternatives[0].sortOrder + 1 : 1;
+    }
+
+    /**
+     * Processa o detalhamento dos alimentos para uma alternativa de refeição
+     * @param alternativeId ID da alternativa de refeição
+     * @returns A alternativa detalhada
+     */
+    async processAlternativeDetailing(alternativeId: string): Promise<DietMealAlternative> {
+        const alternative = await this.getDietMealAlternative(alternativeId);
+
+        if (!alternative) {
+            throw new NotFoundException(`Alternativa de refeição com ID "${alternativeId}" não encontrada`);
+        }
+
+        // Buscar a refeição original
+        const originalMeal = await this.getMeal(alternative.originalMealId);
+
+        if (!originalMeal) {
+            throw new NotFoundException(`Refeição original não encontrada`);
+        }
+
+        // Buscar o plano e outros dados necessários
+        const plan = await this.dietPlanRepository.findOne({where: {id: originalMeal.planId}});
+        if (!plan) {
+            throw new NotFoundException(`Plano não encontrado`);
+        }
+
+        // Buscar preferências alimentares do usuário
+        const userPreferences = await this.nutritionService.getUserFoodPreferences(plan.userId);
+
+        // Tentar buscar dados biométricos do usuário
+        let biometrics;
+        try {
+            biometrics = await this.nutritionService.getUserBiometrics(plan.userId);
+        } catch (error) {
+            this.logger.warn(`Não foi possível buscar dados biométricos: ${error.message}`);
+        }
+
+        // Determinar o tipo de dieta
+        const dietType = await this.getDietTypeFromUserGoal(plan.userId);
+
+        // Buscar as refeições do plano para determinar posição e total
+        const meals = await this.dietMealRepository.find({
+            where: {planId: plan.id},
+            order: {sortOrder: 'ASC'}
+        });
+
+        const mealPosition = originalMeal.sortOrder;
+        const totalMeals = meals.length;
+
+        // Formatar alimentos da refeição original
+        const originalMealFoods = originalMeal.foods?.map(food => ({
+            name: food.name,
+            grams: food.grams
+        })) || [];
+
+        // Gerar o prompt usando a função atualizada
+        const prompt = this.generateFoodDetailingPrompt(
+            originalMeal, // Usamos os dados da refeição original para macronutrientes
+            userPreferences,
+            mealPosition,
+            totalMeals,
+            dietType,
+            biometrics,
+            true, // Indicamos que é uma alternativa
+            {
+                name: originalMeal.name,
+                foods: originalMealFoods,
+                howTo: originalMeal.howTo
+            }
+        );
+
+        // Chamar API de IA para gerar a alternativa
+        const aiService = this.aiServiceFactory.getServiceWithFallback();
+        const response = await aiService.generateJsonCompletion<MealDetailsDto>(prompt);
+        const mealDetails = response.content;
+
+        // Salvar detalhes da alternativa
+        await this.saveAlternativeDetails(alternativeId, mealDetails);
+
+        // Buscar a alternativa atualizada com todos os dados
+        return this.getDietMealAlternative(alternativeId);
+    }
+
+    /**
+     * Obtém uma alternativa de refeição com seus alimentos
+     */
+    async getDietMealAlternative(alternativeId: string): Promise<DietMealAlternative> {
+        const alternative = await this.dietMealAlternativeRepository.findOne({
+            where: {id: alternativeId},
+            relations: ['foods', 'originalMeal']
+        });
+
+        if (!alternative) {
+            throw new NotFoundException(`Alternativa de refeição com ID "${alternativeId}" não encontrada`);
+        }
+
+        return alternative;
+    }
+
+    /**
+     * Salva os detalhes de uma alternativa de refeição
+     */
+    async saveAlternativeDetails(
+        alternativeId: string,
+        mealDetails: MealDetailsDto
+    ): Promise<void> {
+        const queryRunner = this.dataSource.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
+
+        try {
+            // Atualizar detalhes da alternativa
+            await queryRunner.manager.update(DietMealAlternative, alternativeId, {
+                howTo: mealDetails.howTo
+            });
+
+            // Remover alimentos existentes da alternativa se houver
+            const existingFoods = await this.dietMealAlternativeFoodRepository.find({
+                where: {alternativeId}
+            });
+
+            if (existingFoods.length > 0) {
+                await queryRunner.manager.remove(existingFoods);
+            }
+
+            // Salvar novos alimentos
+            for (let index = 0; index < mealDetails.foods.length; index++) {
+                const food = mealDetails.foods[index];
+                const alternativeFood = queryRunner.manager.create(DietMealAlternativeFood, {
+                    alternativeId: alternativeId,
+                    name: food.name,
+                    grams: food.grams,
+                    protein: food.macronutrients.protein,
+                    carbs: food.macronutrients.carbs,
+                    fat: food.macronutrients.fat,
+                    calories: this.calculateFoodCalories(food.macronutrients),
+                    sortOrder: index + 1
+                });
+
+                await queryRunner.manager.save(DietMealAlternativeFood, alternativeFood);
+            }
+
+            await queryRunner.commitTransaction();
+            this.logger.log(`Detalhes da alternativa ${alternativeId} salvos com sucesso`);
+        } catch (error) {
+            await queryRunner.rollbackTransaction();
+            this.logger.error(`Erro ao salvar detalhes da alternativa: ${error.message}`, error.stack);
+            throw error;
+        } finally {
+            await queryRunner.release();
+        }
+    }
+
+    /**
+     * Obtém o tipo de dieta baseado no objetivo do usuário
+     */
+    private async getDietTypeFromUserGoal(userId: number): Promise<string> {
+        try {
+            const nutritionGoal = await this.nutritionService.getUserNutritionGoal(userId);
+            if (nutritionGoal) {
+                switch (nutritionGoal.goalType) {
+                    case DietGoalType.WEIGHT_LOSS:
+                        return nutritionGoal.calorieAdjustment <= -15 ? 'low-carb' : 'balanced';
+                    case DietGoalType.WEIGHT_GAIN:
+                        return 'high-protein';
+                    default:
+                        return 'balanced';
+                }
+            }
+        } catch (error) {
+            this.logger.warn(`Não foi possível obter o objetivo nutricional: ${error.message}`);
+        }
+        return 'balanced'; // Valor padrão
     }
 }

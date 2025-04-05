@@ -1,12 +1,24 @@
-
-import { Controller, Post, Get, Param, Body, UseGuards, Request, NotFoundException, BadRequestException, Logger, Query } from '@nestjs/common';
-import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
-import { DietService } from '../../nutrition/services/diet.service';
-import { NutritionService } from '../../nutrition/services/nutrition.service';
-import { AIServiceFactory } from '../../../shared/factories/ai-service.factory';
+import {
+    Controller,
+    Post,
+    Get,
+    Param,
+    Body,
+    UseGuards,
+    Request,
+    NotFoundException,
+    Logger,
+    ForbiddenException,
+    InternalServerErrorException
+} from '@nestjs/common';
+import {JwtAuthGuard} from '../../auth/guards/jwt-auth.guard';
+import {DietService} from '../../nutrition/services/diet.service';
+import {NutritionService} from '../../nutrition/services/nutrition.service';
+import {AIServiceFactory} from '../../../shared/factories/ai-service.factory';
 import {
     DietPlanResponseDto,
-    DietPlanWithMealsResponseDto, MealDetailsDto
+    DietPlanWithMealsResponseDto,
+    MealDetailsDto
 } from '../../nutrition/dto';
 
 @Controller('diet')
@@ -18,7 +30,8 @@ export class DietController {
         private readonly dietService: DietService,
         private readonly nutritionService: NutritionService,
         private aiServiceFactory: AIServiceFactory,
-    ) {}
+    ) {
+    }
 
     /**
      * Endpoint para cálculo metabólico
@@ -128,56 +141,80 @@ export class DietController {
     }
 
     /**
-     * Endpoint para detalhamento de alimentos (Fase 3)
-     * Define os alimentos específicos para uma refeição
-     * Versão atualizada para processamento síncrono
+     * Endpoint para gerar uma alternativa para uma refeição específica
+     * Esta funcionalidade permite criar opções diferentes para a mesma refeição
+     * mantendo os mesmos macronutrientes
      */
-    @Post('generate-alternative')
-    async detailFoods(
-        @Body() body: { mealId: string },
+    @Post('generate-meal-alternative')
+    async generateMealAlternative(
+        @Body() body: { mealId: string, name?: string },
         @Request() req
     ) {
         const userId = req.user.userId;
-        this.logger.log(`Iniciando detalhamento de alimentos para usuário ${userId}, refeição ${body.mealId}`);
+        this.logger.log(`Gerando alternativa de refeição para usuário ${userId}, refeição ${body.mealId}`);
 
         try {
+            // Verificar se a refeição existe e pertence ao usuário
             const meal = await this.dietService.getMeal(body.mealId);
             const plan = await this.dietService.getDietPlan(meal.planId);
 
-            const foodPreferences = await this.nutritionService.getUserFoodPreferences(userId);
-            const biometrics = await this.nutritionService.getUserBiometrics(userId);
-            const mealPosition = meal.sortOrder;
-            const totalMeals = plan.meals?.length || 1;
+            if (plan.userId !== userId) {
+                throw new ForbiddenException('Acesso não autorizado a esta refeição');
+            }
 
-            const dietType = await this.getDietTypeFromUserGoal(userId);
-
-            const prompt = this.dietService.generateFoodDetailingPrompt(
-                meal,
-                foodPreferences,
-                mealPosition,
-                totalMeals,
-                dietType,
-                biometrics
+            // Processo em duas etapas:
+            // 1. Criar a estrutura da alternativa
+            const alternativeName = body.name || `Alternativa para ${meal.name}`;
+            const alternative = await this.dietService.createMealAlternative(
+                body.mealId,
+                alternativeName
             );
 
-            const aiService = this.aiServiceFactory.getServiceWithFallback();
-            const response = await aiService.generateJsonCompletion<MealDetailsDto>(prompt);
-
-            await this.dietService.saveMealDetails(meal.id, response.content as MealDetailsDto);
-
-            const updatedMeal = await this.dietService.getMeal(meal.id);
+            // 2. Detalhar os alimentos da alternativa usando IA
+            const detailedAlternative = await this.dietService.processAlternativeDetailing(
+                alternative.id
+            );
 
             return {
                 success: true,
-                message: 'Detalhamento de alimentos concluído com sucesso',
+                message: 'Alternativa de refeição gerada com sucesso',
                 mealId: meal.id,
                 planId: plan.id,
-                meal: updatedMeal
+                alternative: {
+                    id: detailedAlternative.id,
+                    name: detailedAlternative.name,
+                    macronutrients: {
+                        protein: detailedAlternative.protein,
+                        carbs: detailedAlternative.carbs,
+                        fat: detailedAlternative.fat,
+                        calories: detailedAlternative.calories
+                    },
+                    howTo: detailedAlternative.howTo,
+                    foods: detailedAlternative.foods?.map(food => ({
+                        name: food.name,
+                        grams: food.grams,
+                        macronutrients: {
+                            protein: food.protein,
+                            carbs: food.carbs,
+                            fat: food.fat,
+                            calories: food.calories
+                        },
+                        sortOrder: food.sortOrder
+                    }))
+                }
             };
-
         } catch (error) {
-            this.logger.error(`Erro no detalhamento de alimentos: ${error.message}`, error.stack);
-            throw error;
+            this.logger.error(`Erro ao gerar alternativa de refeição: ${error.message}`, error.stack);
+
+            if (error instanceof NotFoundException) {
+                throw new NotFoundException(error.message);
+            }
+
+            if (error instanceof ForbiddenException) {
+                throw new ForbiddenException(error.message);
+            }
+
+            throw new InternalServerErrorException('Erro ao processar a alternativa de refeição');
         }
     }
 
