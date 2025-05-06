@@ -11,6 +11,8 @@ import { AuthModule } from "./modules/auth/auth.module";
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { HealthModule } from './modules/health/health.module';
+import { FeedbackModule } from './modules/feedback/feedback.module';
+import { SharedModule } from './shared/shared.module';
 
 @Module({
     imports: [
@@ -81,6 +83,9 @@ import { HealthModule } from './modules/health/health.module';
             }),
         }),
 
+        // Módulos compartilhados
+        SharedModule,
+
         // Health check module
         HealthModule,
 
@@ -89,7 +94,8 @@ import { HealthModule } from './modules/health/health.module';
         DietModule,
         WorkerModule,
         UsersModule,
-        AuthModule
+        AuthModule,
+        FeedbackModule
     ],
 })
 export class AppModule {}
